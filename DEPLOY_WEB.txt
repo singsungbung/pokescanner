@@ -14,5 +14,5 @@ HTTPS가 필요한 이유:
 - 브라우저 카메라(getUserMedia)는 일반적으로 HTTPS 또는 localhost에서만 안정적으로 허용됩니다.
 
 인터넷 연결:
-- 앱 데이터는 로컬 파일이지만 Tesseract.js와 OpenCV.js는 CDN에서 불러옵니다.
+- 앱 데이터는 로컬 파일이지만 Tesseract.js는 CDN에서 불러옵니다.
 - CDN을 로컬 파일로 바꾸지 않는 한 첫 실행에는 인터넷 연결이 필요합니다.

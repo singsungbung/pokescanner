@@ -18,6 +18,7 @@ const els = {
   resultStatus: $('resultStatus'),
   setSelect: $('setSelect'),
   startCamera: $('startCamera'),
+  imageInput: $('imageInput'),
   stopCamera: $('stopCamera'),
   rescanBtn: $('rescanBtn'),
   toggleSearch: $('toggleSearch'),
@@ -86,11 +87,12 @@ const OVERLAY_COLORS = {
   noPrice: '#ffbd4a'
 };
 
-const DETECT_EVERY_MS = 150;
+const DETECT_EVERY_MS = 420;
 const STABLE_FRAME_COUNT = 3;
 const STABLE_MS = 550;
-const OCR_COOLDOWN_MS = 1300;
+const OCR_COOLDOWN_MS = 1700;
 const RECENT_DEDUPE_MS = 30000;
+const USE_BOX_TRACKING = false;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -210,9 +212,12 @@ function normalizeOcrText(raw) {
 
 function parseCardNumber(raw, options = {}) {
   const compact = normalizeOcrText(raw);
-  const match = options.strict
-    ? compact.match(/(\d{3})\/(063|092)/)
+  let match = options.strict
+    ? compact.match(/(\d{2,3})\/(063|092|63|92)/)
     : compact.match(/(\d{1,3})\/(0?63|0?92)/);
+  if (!match && options.strict) {
+    match = compact.match(/(\d{2,3})(063|092)$/);
+  }
   if (!match) return null;
 
   const index = Number(match[1]);
@@ -307,6 +312,12 @@ function renderSearch(query) {
 }
 
 function waitForCv() {
+  if (!USE_BOX_TRACKING) {
+    cvReady = false;
+    els.detectStatus.textContent = 'GUIDE OCR';
+    return;
+  }
+
   const markReady = () => {
     if (window.cv && cv.Mat) {
       cvReady = true;
@@ -524,19 +535,72 @@ function detectionSimilarity(a, b) {
   return centerDelta < 0.055 && widthDelta < 0.12 && heightDelta < 0.12;
 }
 
+function getGuideFrameVideoRect() {
+  const vw = els.video.videoWidth || 1280;
+  const vh = els.video.videoHeight || 720;
+  return {
+    x: Math.round(vw * 0.11),
+    y: Math.round(vh * 0.12),
+    width: Math.round(vw * 0.78),
+    height: Math.round(vh * 0.76)
+  };
+}
+
+function getNumberStripRect(cardRect) {
+  const inner = {
+    x: cardRect.x + cardRect.width * 0.07,
+    y: cardRect.y + cardRect.height * 0.08,
+    width: cardRect.width * 0.86,
+    height: cardRect.height * 0.84
+  };
+  return {
+    x: Math.round(inner.x),
+    y: Math.round(inner.y + inner.height * 0.74),
+    width: Math.round(inner.width * 0.72),
+    height: Math.round(inner.height * 0.24)
+  };
+}
+
+function drawGuideOcrOverlay(state = 'ready') {
+  resizeOverlay();
+  const ctx = els.detectCanvas.getContext('2d');
+  ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
+
+  const color = OVERLAY_COLORS[state] || OVERLAY_COLORS.ready;
+  const guide = getGuideFrameVideoRect();
+  const strip = getNumberStripRect(guide);
+  setGuideColor(color);
+
+  ctx.save();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 12;
+  ctx.strokeRect(guide.x, guide.y, guide.width, guide.height);
+  ctx.lineWidth = 3;
+  ctx.fillStyle = 'rgba(255,189,74,.12)';
+  ctx.fillRect(strip.x, strip.y, strip.width, strip.height);
+  ctx.strokeRect(strip.x, strip.y, strip.width, strip.height);
+  ctx.restore();
+}
+
 function processDetectionTick() {
-  const detected = detectCardRect();
   const now = Date.now();
+  const detected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
 
   if (!detected) {
     latestDetection = null;
     stableFrames = 0;
     stableSince = 0;
     if (!isOcrBusy) {
-      clearOverlay();
-      els.detectStatus.textContent = cvReady ? 'BOX 찾는 중' : 'BOX CDN 대기';
-      setStatus('seeking');
-      lastOverlayState = 'seeking';
+      drawGuideOcrOverlay('ready');
+      els.detectStatus.textContent = 'GUIDE OCR';
+      setStatus('ready', '하단 번호 맞추기');
+      lastOverlayState = 'ready';
+    }
+    if (!isOcrBusy && now >= ocrCooldownUntil) {
+      ocrCooldownUntil = now + OCR_COOLDOWN_MS;
+      ocrImageFromDetection(null);
     }
     return;
   }
@@ -555,10 +619,14 @@ function processDetectionTick() {
   const isStable = stableFrames >= STABLE_FRAME_COUNT && stableMs >= STABLE_MS;
 
   if (!isStable) {
-    els.detectStatus.textContent = `BOX ${stableFrames}/${STABLE_FRAME_COUNT}`;
-    setStatus('stabilizing');
-    drawDetectedOverlay(detected, 'stabilizing');
-    lastOverlayState = 'stabilizing';
+    els.detectStatus.textContent = 'GUIDE OCR';
+    setStatus('ready', '하단 번호 맞추기');
+    drawDetectedOverlay(detected, 'ready');
+    lastOverlayState = 'ready';
+    if (now >= ocrCooldownUntil) {
+      ocrCooldownUntil = now + OCR_COOLDOWN_MS;
+      ocrImageFromDetection(detected);
+    }
     return;
   }
 
@@ -570,7 +638,7 @@ function processDetectionTick() {
   }
 
   drawDetectedOverlay(detected, lastOverlayState === 'complete' ? 'complete' : 'ready');
-  els.detectStatus.textContent = 'BOX STABLE';
+  els.detectStatus.textContent = 'GUIDE OCR';
 
   if (now >= ocrCooldownUntil) {
     ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -633,6 +701,24 @@ function cropNumberStrip(sourceCanvas) {
   els.canvas.height = raw.height;
   els.canvas.getContext('2d', { willReadFrequently: true }).drawImage(raw, 0, 0);
   return preprocessForOcr(raw);
+}
+
+function captureNumberFromGuide() {
+  const canvas = getFrameCanvasFull();
+  const vw = canvas.width;
+  const vh = canvas.height;
+  const rect = getGuideFrameVideoRect();
+  const sx = Math.max(0, rect.x);
+  const sy = Math.max(0, rect.y);
+  const sw = Math.min(vw - sx, rect.width);
+  const sh = Math.min(vh - sy, rect.height);
+  if (sw < 20 || sh < 20) return null;
+
+  const cardCanvas = document.createElement('canvas');
+  cardCanvas.width = sw;
+  cardCanvas.height = sh;
+  cardCanvas.getContext('2d', { willReadFrequently: true }).drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cropNumberStrip(cardCanvas);
 }
 
 function captureNumberFromQuad(points) {
@@ -702,26 +788,59 @@ function captureNumberFromRect(rect) {
   return cropNumberStrip(cardCanvas);
 }
 
-function captureOcrRegion(detection) {
-  if (!detection?.rect) return null;
-  return captureNumberFromQuad(detection.points) || captureNumberFromRect(detection.rect);
+function preparePhotoForOcr(img) {
+  const maxW = 1600;
+  const naturalW = img.naturalWidth || img.width;
+  const naturalH = img.naturalHeight || img.height;
+  const ratio = Math.min(1, maxW / Math.max(1, naturalW));
+  const w = Math.round(naturalW * ratio);
+  const h = Math.round(naturalH * ratio);
+
+  const full = document.createElement('canvas');
+  full.width = w;
+  full.height = h;
+  full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
+
+  const cardRect = {
+    x: Math.round(w * 0.08),
+    y: Math.round(h * 0.08),
+    width: Math.round(w * 0.84),
+    height: Math.round(h * 0.84)
+  };
+  const sx = Math.max(0, cardRect.x);
+  const sy = Math.max(0, cardRect.y);
+  const sw = Math.min(w - sx, cardRect.width);
+  const sh = Math.min(h - sy, cardRect.height);
+
+  const cardCanvas = document.createElement('canvas');
+  cardCanvas.width = Math.max(1, sw);
+  cardCanvas.height = Math.max(1, sh);
+  cardCanvas.getContext('2d', { willReadFrequently: true }).drawImage(full, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cropNumberStrip(cardCanvas);
 }
 
-async function ocrImageFromDetection(detection) {
+function captureOcrRegion(detection) {
+  return captureNumberFromGuide() ||
+    captureNumberFromQuad(detection?.points) ||
+    captureNumberFromRect(detection?.rect);
+}
+
+async function ocrPreparedFrame(frame, sourceLabel = '번호 이미지', detection = null, options = {}) {
   if (isOcrBusy) return;
-  const frame = captureOcrRegion(detection);
   if (!frame) {
     setStatus('failed', '번호 영역을 자르지 못함');
-    drawDetectedOverlay(detection, 'failed');
+    if (detection) drawDetectedOverlay(detection, 'failed');
+    else drawGuideOcrOverlay('failed');
     lastOverlayState = 'failed';
     return;
   }
 
   isOcrBusy = true;
   try {
-    setStatus('ocr');
+    setStatus('ocr', sourceLabel);
     els.detectStatus.textContent = 'OCR';
-    drawDetectedOverlay(detection, 'ocr');
+    if (detection) drawDetectedOverlay(detection, 'ocr');
+    else drawGuideOcrOverlay('ocr');
     lastOverlayState = 'ocr';
 
     const text = await runNumberOcr(frame);
@@ -737,7 +856,7 @@ async function ocrImageFromDetection(detection) {
       return;
     }
 
-    handleDetectedCard(card, detection, text);
+    handleDetectedCard(card, detection, text, options);
   } catch (err) {
     console.error(err);
     handleOcrFailure('failed', err.message || 'OCR 오류', detection, '');
@@ -746,16 +865,22 @@ async function ocrImageFromDetection(detection) {
   }
 }
 
+async function ocrImageFromDetection(detection) {
+  const frame = captureOcrRegion(detection);
+  return ocrPreparedFrame(frame, '하단 번호', detection);
+}
+
 function handleOcrFailure(statusKey, detail, detection, rawText) {
   console.log('OCR miss:', statusKey, detail, rawText);
   ocrCandidateId = null;
   ocrCandidateCount = 0;
   setStatus(statusKey, statusKey === 'missing' ? detail : '직접 검색');
   if (detection) drawDetectedOverlay(detection, statusKey);
+  else drawGuideOcrOverlay(statusKey);
   lastOverlayState = statusKey;
 }
 
-function handleDetectedCard(card, detection, rawText) {
+function handleDetectedCard(card, detection, rawText, options = {}) {
   if (ocrCandidateId === card.card_id) ocrCandidateCount += 1;
   else {
     ocrCandidateId = card.card_id;
@@ -763,7 +888,7 @@ function handleDetectedCard(card, detection, rawText) {
   }
 
   const isDifferentCard = currentCard && currentCard.card_id !== card.card_id;
-  const requiredCount = isDifferentCard ? 2 : 1;
+  const requiredCount = options.confirmImmediately ? 1 : (isDifferentCard ? 2 : 1);
 
   if (ocrCandidateCount < requiredCount) {
     setStatus('stabilizing', `${card.number} 후보 확인 중`);
@@ -774,7 +899,8 @@ function handleDetectedCard(card, detection, rawText) {
   }
 
   confirmCard(card, 'scan');
-  drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
+  if (detection) drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
+  else drawGuideOcrOverlay(priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   lastOverlayState = priceHasValue(priceFor(card)) ? 'complete' : 'noPrice';
   if (navigator.vibrate) navigator.vibrate(45);
   console.log('Detected:', card.card_id, rawText);
@@ -801,7 +927,7 @@ async function startCamera() {
     els.video.srcObject = stream;
     els.video.style.display = 'block';
     els.placeholder.style.display = 'none';
-    setStatus('seeking');
+    setStatus('ready', '하단 번호 맞추기');
     els.video.onloadedmetadata = () => {
       resizeOverlay();
       els.video.play().catch(() => {});
@@ -837,6 +963,7 @@ function resetScan() {
   lastOverlayState = 'seeking';
   renderEmpty('seeking');
   clearOverlay();
+  ocrCooldownUntil = 0;
 }
 
 function getMarketSearchTerm(card) {
@@ -1059,6 +1186,22 @@ function init() {
   }));
 
   els.startCamera.addEventListener('click', startCamera);
+  els.imageInput.addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      const frame = preparePhotoForOcr(img);
+      ocrPreparedFrame(frame, '사진 하단 번호', null, { confirmImmediately: true });
+      URL.revokeObjectURL(img.src);
+      els.imageInput.value = '';
+    };
+    img.onerror = () => {
+      setStatus('failed', '사진을 열 수 없음');
+      els.imageInput.value = '';
+    };
+    img.src = URL.createObjectURL(file);
+  });
   els.stopCamera.addEventListener('click', stopCamera);
   els.rescanBtn.addEventListener('click', resetScan);
   els.toggleSearch.addEventListener('click', () => {

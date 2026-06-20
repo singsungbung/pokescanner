@@ -13,7 +13,7 @@ iPhone Safari 실행:
 - GitHub Pages 같은 HTTPS 정적 호스팅에 올려서 사용하세요.
 
 주의:
-- Tesseract.js와 OpenCV.js는 CDN에서 불러옵니다.
+- Tesseract.js는 CDN에서 불러옵니다.
 - 첫 OCR은 엔진 로딩 때문에 느릴 수 있습니다.
 - 가격은 실시간 시세가 아니라 data/prices.js의 마지막 업데이트 기준 로컬 가격입니다.
 - 인식 실패 시 기본 카드로 대체하지 않습니다.

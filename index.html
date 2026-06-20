@@ -10,7 +10,6 @@
   <script defer src="data/cards.js"></script>
   <script defer src="data/prices.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script defer src="https://docs.opencv.org/4.x/opencv.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -33,7 +32,7 @@
       <div class="camera-placeholder" id="cameraPlaceholder">
         <div class="big-icon">M1S</div>
         <p>카메라를 켜고 카드를 비춰줘</p>
-        <small>카드 외곽선이 잡히면 하단 번호만 읽습니다.</small>
+        <small>하단 번호를 가이드 안에 맞추면 바로 읽습니다.</small>
       </div>
       <div class="guide-frame" id="guideFrame">
         <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
@@ -76,6 +75,10 @@
 
     <section class="controls">
       <button id="startCamera">카메라 시작</button>
+      <label class="file-btn">
+        사진 스캔
+        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+      </label>
       <button id="rescanBtn">다시 스캔</button>
       <button id="toggleSearch">직접 검색</button>
       <button id="addCollection">컬렉션 추가</button>

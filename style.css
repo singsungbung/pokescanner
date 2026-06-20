@@ -39,6 +39,27 @@ button {
 button:active { transform: translateY(1px); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 
+.file-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  color: var(--text);
+  background: var(--panel-soft);
+  border-radius: 8px;
+  min-height: 44px;
+  padding: 10px 12px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.file-btn input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .app-shell {
   min-height: 100dvh;
   max-width: 560px;
@@ -476,7 +497,7 @@ video {
 
 @media (min-width: 520px) {
   .controls {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
   }
 
   #marketBtn { grid-column: auto; }
