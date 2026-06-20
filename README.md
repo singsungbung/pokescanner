@@ -10,11 +10,12 @@
 - `data/cards.js`: 카드 정보 DB
 - `data/prices.js`: 가격 DB
 - `data/visual-index.js`: 선택적 이미지 특징값 DB
+- `scripts/build-visual-index.py`: 로컬 카드 시트 이미지에서 visual index 생성
 - `service-worker.js`: 정적 앱 파일 캐시
 
 카드 정보와 가격 정보는 `card_id`로 연결됩니다. 가격은 실시간 시세가 아니라 `data/prices.js`에 저장된 마지막 업데이트 기준 로컬 가격입니다.
 
-중요: 현재 `data/visual-index.js`는 비어 있습니다. 이름/번호가 가려져도 카드 이미지만으로 인식하려면 카드 정면 이미지와 미리 계산한 visual feature/hash DB를 채워야 합니다.
+중요: 원본 카드 이미지는 공개 저장소에 올리지 않는 것을 권장합니다. 로컬 카드 시트 이미지에서 특징값만 뽑아 `data/visual-index.js`에 저장합니다.
 
 ## 데이터 구조
 
@@ -57,6 +58,16 @@
 - `color` 또는 `color_grid`: 카드 crop 색상 그리드
 
 이 파일이 비어 있으면 앱은 visual-first 후보를 만들 수 없고 OCR/fuzzy 후보만 fallback으로 사용합니다.
+
+## Visual Index 생성
+
+M1S 카드 시트 이미지 6장을 로컬에 둔 뒤 다음 명령으로 visual index를 생성합니다.
+
+```powershell
+C:\Users\정서엽\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe scripts\build-visual-index.py
+```
+
+스크립트는 최근 첨부된 큰 `codex-clipboard-*.png` 시트 6장을 자동으로 찾고, 카드 92장을 순서대로 crop한 뒤 `data/visual-index.js`에 feature만 저장합니다. 원본 이미지와 crop 이미지는 저장소에 저장하지 않습니다.
 
 ## 실행 방법
 
@@ -108,9 +119,9 @@ python -m http.server 8000
 
 카드 crop → visual feature 추출 → visual index top-k 검색 → OCR 보조 점수 결합 → voting/lock-on
 
-다만 실제 image-first 인식 품질은 `data/visual-index.js`에 카드별 이미지 특징값이 채워져야 나옵니다. 현재 M1S 카드 DB의 `image_url`과 `local_image_path`도 비어 있으므로, 이름/번호를 손으로 가린 상태에서 정확히 맞히는 것은 아직 불가능합니다.
+현재 `data/visual-index.js`에는 JP / M1S 92장의 로컬 visual feature가 들어 있습니다. 실제 카메라 crop 품질, 카드 기울기, 조명, 슬리브 반사에 따라 threshold 튜닝은 더 필요합니다.
 
-다음 단계는 카드 이미지 파일을 추가하고 visual index 생성 스크립트를 붙이는 것입니다.
+언어 판별은 아직 구현하지 않았습니다. 확장 방향은 일판 이미지로 먼저 카드 후보를 찾고, 그 다음 보이는 문자 영역을 훑어 JP / KR / EN 여부를 보조 확인하는 구조입니다. OCR이 최종 판단을 지배하지 않고 visual match를 우선합니다.
 
 ## 인식 상태 색상
 
