@@ -38,6 +38,8 @@ const els = {
   candidatePanel: $('candidatePanel'),
   candidateTitle: $('candidateTitle'),
   candidateList: $('candidateList'),
+  debugCrop: $('debugCrop'),
+  debugScores: $('debugScores'),
   thumb: $('thumb'),
   addCollection: $('addCollection'),
   collectionCondition: $('collectionCondition'),
@@ -93,20 +95,29 @@ const OVERLAY_COLORS = {
   noPrice: '#4aa3ff'
 };
 
-const DETECT_EVERY_MS = 420;
-const STABLE_FRAME_COUNT = 3;
-const STABLE_MS = 550;
-const OCR_COOLDOWN_MS = 1700;
+const DETECT_EVERY_MS = 120;
+const FAST_VISUAL_EVERY_MS = 280;
+const STABLE_FRAME_COUNT = 2;
+const STABLE_MS = 260;
+const OCR_COOLDOWN_MS = 900;
 const RECENT_DEDUPE_MS = 30000;
-const USE_BOX_TRACKING = false;
+const USE_BOX_TRACKING = true;
+const CARD_ASPECT_RATIO = 63 / 88;
 const VOTE_WINDOW = 10;
 const VOTE_MAX_AGE_MS = 18000;
-const DIRECT_SCORE = 74;
-const CANDIDATE_SCORE = 38;
-const CLEAR_NUMBER_SCORE = 56;
-const VISUAL_DIRECT_SCORE = 62;
-const VISUAL_CANDIDATE_SCORE = 40;
-const VISUAL_OCR_LOCK_FLOOR = 28;
+const DIRECT_SCORE = 68;
+const CANDIDATE_SCORE = 32;
+const CLEAR_NUMBER_SCORE = 52;
+const VISUAL_DIRECT_SCORE = 56;
+const VISUAL_CANDIDATE_SCORE = 32;
+const VISUAL_PREVIEW_SCORE = 26;
+const VISUAL_OCR_LOCK_FLOOR = 22;
+const VISUAL_MARGIN_LOCK = 3;
+const LOCK_HOLD_MS = 900;
+const LOCK_RECHECK_MS = 360;
+const LOCK_SWITCH_SCORE = 52;
+const LOCK_SWITCH_VOTES = 2;
+const LOCK_LOST_MS = 1100;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -119,6 +130,7 @@ let nameOcrWorkerPromise = null;
 let detectionLoopId = null;
 let detectionLoopActive = false;
 let lastDetectionTick = 0;
+let lastFastVisualTick = 0;
 let lastDetection = null;
 let stableFrames = 0;
 let stableSince = 0;
@@ -127,8 +139,15 @@ let ocrCooldownUntil = 0;
 let ocrCandidateId = null;
 let ocrCandidateCount = 0;
 let lastOverlayState = 'seeking';
+let lockedCardId = null;
+let lockedAt = 0;
+let lockSwitchCardId = null;
+let lockSwitchCount = 0;
+let lastLockCheckTick = 0;
+let lastLockSeenAt = 0;
 let consecutiveNumberMisses = 0;
 let ocrVotes = [];
+const scanThumbByCardId = new Map();
 
 const recentStorageKey = 'm1s_recent_scans_v1';
 const collectionStorageKey = 'm1s_collection_v3';
@@ -182,7 +201,48 @@ function priceFor(card) {
   return card ? priceByCardId.get(card.card_id) || null : null;
 }
 
+function fallbackThumbText(card) {
+  return card ? `${card.rarity}\n${pad3(card.index)}` : selectedSet.set_code;
+}
+
+function setThumbContent(card) {
+  if (!els.thumb) return;
+  const src = card ? (scanThumbByCardId.get(card.card_id) || card.local_image_path || card.image_url) : '';
+  if (src) {
+    els.thumb.innerHTML = `<img src="${src}" alt="">`;
+    els.thumb.style.background = '#0f121a';
+    return;
+  }
+
+  els.thumb.textContent = card ? fallbackThumbText(card) : selectedSet.set_code;
+  els.thumb.style.background = card?.rarity === 'MUR'
+    ? 'linear-gradient(145deg,#fff4c0,#d9ccff 48%,#ffd166)'
+    : card?.rarity === 'SAR'
+      ? 'linear-gradient(145deg,#e8f7ff,#ffd166 54%,#ff9f43)'
+      : card?.rarity === 'SR'
+        ? 'linear-gradient(145deg,#ffffff,#d7e4ff 50%,#ffd166)'
+        : card?.rarity === 'AR'
+          ? 'linear-gradient(145deg,#fff2c4,#a7e6ff 52%,#ffd166)'
+          : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+}
+
+function rememberScanThumbnail(card, sourceCanvas) {
+  if (!card || !sourceCanvas) return;
+  try {
+    const out = document.createElement('canvas');
+    out.width = 152;
+    out.height = 212;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceCanvas, 0, 0, out.width, out.height);
+    scanThumbByCardId.set(card.card_id, out.toDataURL('image/jpeg', 0.82));
+  } catch (err) {
+    console.warn('scan thumb failed:', err);
+  }
+}
+
 function renderEmpty(statusKey = 'seeking') {
+  releaseScanLock();
   currentCard = null;
   els.resultCard?.classList.add('is-empty');
   hideCandidates();
@@ -194,8 +254,7 @@ function renderEmpty(statusKey = 'seeking') {
   els.psaPrice.textContent = '—';
   els.priceUpdated.textContent = '업데이트 —';
   els.priceConfidence.textContent = '신뢰도 —';
-  els.thumb.textContent = selectedSet.set_code;
-  els.thumb.style.background = 'linear-gradient(145deg, #eef3ff, #ffd166 48%, #f4a51c)';
+  setThumbContent(null);
   setStatus(statusKey);
 }
 
@@ -215,16 +274,7 @@ function renderCard(card) {
   els.psaPrice.textContent = hasPrice ? fmtJPY(price.psa10_jpy) : '가격 데이터 없음';
   els.priceUpdated.textContent = price?.updated_at ? `업데이트 ${price.updated_at}` : '업데이트 —';
   els.priceConfidence.textContent = price?.confidence ? `신뢰도 ${price.confidence}` : '신뢰도 —';
-  els.thumb.textContent = `${card.rarity}\n${pad3(card.index)}`;
-  els.thumb.style.background = card.rarity === 'MUR'
-    ? 'linear-gradient(145deg,#fff4c0,#d9ccff 48%,#ffd166)'
-    : card.rarity === 'SAR'
-      ? 'linear-gradient(145deg,#e8f7ff,#ffd166 54%,#ff9f43)'
-      : card.rarity === 'SR'
-        ? 'linear-gradient(145deg,#ffffff,#d7e4ff 50%,#ffd166)'
-        : card.rarity === 'AR'
-          ? 'linear-gradient(145deg,#fff2c4,#a7e6ff 52%,#ffd166)'
-        : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+  setThumbContent(card);
 }
 
 function hideCandidates() {
@@ -233,7 +283,7 @@ function hideCandidates() {
 }
 
 function candidateThumbText(card) {
-  return `${card.rarity}\n${pad3(card.index)}`;
+  return fallbackThumbText(card);
 }
 
 function renderCandidateCards(candidates, detail = '') {
@@ -274,6 +324,7 @@ function renderCandidateCards(candidates, detail = '') {
     row.addEventListener('click', () => {
       clearCandidateVotes();
       confirmCard(card, 'candidate');
+      lockScan(card);
       hideCandidates();
     });
     els.candidateList.appendChild(row);
@@ -662,8 +713,8 @@ function scoreVisualFeature(feature, entry) {
   const fullHash = entry.hash || entry.full_hash || entry.visual_hash;
   const artHash = entry.artHash || entry.art_hash || entry.artwork_hash;
   const colors = entry.color || entry.color_grid || entry.layout_color;
-  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 35);
-  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 25);
+  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 25);
+  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 35);
   const colorScore = Math.round(colorSimilarity(feature.color, colors) * 10);
   const visualScore = fullScore + artScore + colorScore;
   return {
@@ -673,7 +724,7 @@ function scoreVisualFeature(feature, entry) {
   };
 }
 
-function scoreVisualCandidates(cardCanvas) {
+function scoreVisualCandidates(cardCanvas, minScore = VISUAL_CANDIDATE_SCORE) {
   if (!visualIndex.length || !cardCanvas) return [];
   const feature = extractVisualFeature(cardCanvas);
   if (!feature) return [];
@@ -698,9 +749,152 @@ function scoreVisualCandidates(cardCanvas) {
       };
     })
     .filter(Boolean)
-    .filter(item => item.visualScore >= VISUAL_CANDIDATE_SCORE)
+    .filter(item => item.visualScore >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
+}
+
+function visualMargin(candidates) {
+  if (!candidates?.length) return 0;
+  return (candidates[0].visualScore || 0) - (candidates[1]?.visualScore || 0);
+}
+
+function isClearVisualCandidate(candidates) {
+  const top = candidates?.[0];
+  return Boolean(top) &&
+    top.visualScore >= VISUAL_DIRECT_SCORE &&
+    visualMargin(candidates) >= VISUAL_MARGIN_LOCK;
+}
+
+function updateDebugView(cardCanvas, candidates = [], label = '') {
+  if (els.debugCrop && cardCanvas) {
+    const ctx = els.debugCrop.getContext('2d');
+    ctx.clearRect(0, 0, els.debugCrop.width, els.debugCrop.height);
+    ctx.drawImage(cardCanvas, 0, 0, els.debugCrop.width, els.debugCrop.height);
+  }
+
+  if (!els.debugScores) return;
+  if (!candidates.length) {
+    els.debugScores.textContent = label || '후보 없음';
+    return;
+  }
+
+  els.debugScores.innerHTML = candidates.slice(0, 5).map((item, index) => `
+    <div class="debug-score-row">
+      <strong>${index + 1}. ${item.card.number} ${item.card.name_jp}</strong>
+      <small>총 ${item.score} · 이미지 ${item.visualScore || 0} · art ${item.artworkScore || 0} · color ${item.layoutColorScore || 0}</small>
+      <small>번호 ${item.numberScore || 0} · 이름 ${item.nameScore || 0} · margin ${index === 0 ? visualMargin(candidates) : '-'}</small>
+    </div>
+  `).join('');
+}
+
+function previewVisualCandidates(detection = null, label = '실시간 이미지 후보') {
+  if (!visualIndex.length || isOcrBusy) return false;
+  const cardFrame = captureCardFromDetection(detection) || captureCardCanvasFromGuide();
+  if (!cardFrame) return false;
+
+  const candidates = scoreVisualCandidates(cardFrame, VISUAL_PREVIEW_SCORE);
+  updateDebugView(cardFrame, candidates, candidates.length ? label : 'visual 후보 없음');
+  if (!candidates.length) return false;
+
+  handleOcrCandidates(candidates, detection, 'visual preview', {
+    visualIndexActive: true,
+    confirmImmediately: isClearVisualCandidate(candidates),
+    cardFrame
+  });
+  return true;
+}
+
+function isScanLocked() {
+  return Boolean(currentCard && lockedCardId === currentCard.card_id);
+}
+
+function lockScan(card) {
+  if (!card) return;
+  const now = Date.now();
+  lockedCardId = card.card_id;
+  lockedAt = now;
+  lastLockSeenAt = now;
+  lastLockCheckTick = 0;
+  lockSwitchCardId = null;
+  lockSwitchCount = 0;
+}
+
+function releaseScanLock() {
+  lockedCardId = null;
+  lockedAt = 0;
+  lastLockSeenAt = 0;
+  lastLockCheckTick = 0;
+  lockSwitchCardId = null;
+  lockSwitchCount = 0;
+}
+
+function reviewLockedCard(detection, now) {
+  if (!isScanLocked()) return false;
+  drawDetectedOverlay(detection, priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+  els.detectStatus.textContent = '락온';
+
+  if (now - lastLockCheckTick < LOCK_RECHECK_MS) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return true;
+  }
+
+  lastLockCheckTick = now;
+  const cardFrame = captureCardFromDetection(detection);
+  if (!cardFrame) return true;
+
+  const candidates = scoreVisualCandidates(cardFrame, Math.max(18, VISUAL_PREVIEW_SCORE - 4));
+  updateDebugView(cardFrame, candidates, candidates.length ? '락온 검토 후보' : '락온 검토 후보 없음');
+  const top = candidates[0];
+
+  if (!top) {
+    if (now - lastLockSeenAt > LOCK_LOST_MS) {
+      releaseScanLock();
+      setStatus('seeking', '카드 없음');
+      drawGuideOcrOverlay('seeking');
+      lastOverlayState = 'seeking';
+    }
+    return true;
+  }
+
+  const sameCandidate = candidates.find(item => item.card.card_id === lockedCardId);
+  if (sameCandidate && sameCandidate.visualScore >= VISUAL_PREVIEW_SCORE) {
+    lastLockSeenAt = now;
+    lockSwitchCardId = null;
+    lockSwitchCount = 0;
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    lastOverlayState = priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice';
+    return true;
+  }
+
+  const canSwitch =
+    top.card.card_id !== lockedCardId &&
+    top.visualScore >= LOCK_SWITCH_SCORE &&
+    now - lockedAt >= LOCK_HOLD_MS;
+
+  if (canSwitch) {
+    if (lockSwitchCardId === top.card.card_id) lockSwitchCount += 1;
+    else {
+      lockSwitchCardId = top.card.card_id;
+      lockSwitchCount = 1;
+    }
+
+    setStatus('candidate', `${top.card.number} 새 카드 검토 ${lockSwitchCount}/${LOCK_SWITCH_VOTES}`);
+    drawDetectedOverlay(detection, 'candidate');
+    lastOverlayState = 'candidate';
+
+    if (lockSwitchCount >= LOCK_SWITCH_VOTES) {
+      rememberScanThumbnail(top.card, cardFrame);
+      confirmCard(top.card, 'scan');
+      lockScan(top.card);
+      drawDetectedOverlay(detection, priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice');
+      lastOverlayState = priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice';
+    }
+    return true;
+  }
+
+  setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+  return true;
 }
 
 function mergeVisualAndOcrCandidates(visualCandidates, ocrCandidates) {
@@ -1000,6 +1194,49 @@ function resizeOverlay() {
 function clearOverlay() {
   const ctx = els.detectCanvas.getContext('2d');
   ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
+  resetGuideFramePosition();
+}
+
+function videoRectToDisplayRect(rect) {
+  if (!rect || !els.detectCanvas || !els.video.videoWidth || !els.video.videoHeight) return null;
+  const boxW = els.detectCanvas.clientWidth || els.detectCanvas.getBoundingClientRect().width;
+  const boxH = els.detectCanvas.clientHeight || els.detectCanvas.getBoundingClientRect().height;
+  if (!boxW || !boxH) return null;
+
+  const scale = Math.max(boxW / els.video.videoWidth, boxH / els.video.videoHeight);
+  const offsetX = (boxW - els.video.videoWidth * scale) / 2;
+  const offsetY = (boxH - els.video.videoHeight * scale) / 2;
+  return {
+    x: offsetX + rect.x * scale,
+    y: offsetY + rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale
+  };
+}
+
+function resetGuideFramePosition() {
+  if (!els.guideFrame) return;
+  els.guideFrame.classList.remove('is-tracking');
+  els.guideFrame.style.left = '';
+  els.guideFrame.style.top = '';
+  els.guideFrame.style.width = '';
+  els.guideFrame.style.height = '';
+  els.guideFrame.style.aspectRatio = '';
+  els.guideFrame.style.transform = '';
+}
+
+function syncGuideFrameToDetection(detection) {
+  if (!els.guideFrame || !detection?.rect) return;
+  const displayRect = videoRectToDisplayRect(detection.rect);
+  if (!displayRect) return;
+
+  els.guideFrame.classList.add('is-tracking');
+  els.guideFrame.style.left = `${Math.round(displayRect.x)}px`;
+  els.guideFrame.style.top = `${Math.round(displayRect.y)}px`;
+  els.guideFrame.style.width = `${Math.round(displayRect.width)}px`;
+  els.guideFrame.style.height = `${Math.round(displayRect.height)}px`;
+  els.guideFrame.style.aspectRatio = 'auto';
+  els.guideFrame.style.transform = 'none';
 }
 
 function orderQuadPoints(points) {
@@ -1020,6 +1257,7 @@ function drawDetectedOverlay(detection, state = 'seeking') {
 
   const color = OVERLAY_COLORS[state] || OVERLAY_COLORS.seeking;
   setGuideColor(color, state);
+  syncGuideFrameToDetection(detection);
   ctx.save();
   ctx.lineWidth = 6;
   ctx.strokeStyle = color;
@@ -1063,24 +1301,48 @@ function getFrameCanvasFull() {
   return canvas;
 }
 
+function rotatedRectPoints(rotated) {
+  if (!rotated?.center || !rotated?.size) return null;
+  const cx = rotated.center.x;
+  const cy = rotated.center.y;
+  const w = rotated.size.width;
+  const h = rotated.size.height;
+  const angle = (rotated.angle || 0) * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const corners = [
+    { x: -w / 2, y: -h / 2 },
+    { x: w / 2, y: -h / 2 },
+    { x: w / 2, y: h / 2 },
+    { x: -w / 2, y: h / 2 }
+  ];
+
+  return corners.map(point => ({
+    x: Math.round(cx + point.x * cos - point.y * sin),
+    y: Math.round(cy + point.x * sin + point.y * cos)
+  }));
+}
+
 function detectCardRect() {
   if (!cvReady || !stream || !els.video.videoWidth) return null;
-  let src, gray, blur, edges, dilated, contours, hierarchy, kernel;
+  let src, gray, blur, edges, closed, dilated, contours, hierarchy, kernel;
   try {
     const canvas = getFrameCanvasFull();
     src = cv.imread(canvas);
     gray = new cv.Mat();
     blur = new cv.Mat();
     edges = new cv.Mat();
+    closed = new cv.Mat();
     dilated = new cv.Mat();
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
 
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    cv.Canny(blur, edges, 55, 145);
+    cv.Canny(blur, edges, 35, 118);
     kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, dilated, kernel);
+    cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
+    cv.dilate(closed, dilated, kernel);
     cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     let best = null;
@@ -1088,23 +1350,28 @@ function detectCardRect() {
     for (let i = 0; i < contours.size(); i += 1) {
       const cnt = contours.get(i);
       const area = cv.contourArea(cnt);
-      if (area < frameArea * 0.05 || area > frameArea * 0.88) {
+      if (area < frameArea * 0.012 || area > frameArea * 0.78) {
         cnt.delete();
         continue;
       }
 
       const peri = cv.arcLength(cnt, true);
       const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.024 * peri, true);
+      cv.approxPolyDP(cnt, approx, 0.032 * peri, true);
       const rect = cv.boundingRect(cnt);
-      const ratio = Math.min(rect.width, rect.height) / Math.max(rect.width, rect.height);
+      const rotated = cv.minAreaRect(cnt);
+      const rw = Math.max(1, rotated?.size?.width || rect.width);
+      const rh = Math.max(1, rotated?.size?.height || rect.height);
+      const ratio = Math.min(rw, rh) / Math.max(rw, rh);
       const centerBias = 1 - Math.abs((rect.x + rect.width / 2) - canvas.width / 2) / (canvas.width / 2);
       const ratioScore = 1 - Math.min(1, Math.abs(ratio - 0.715) / 0.35);
-      const score = area * (0.65 + centerBias * 0.2 + ratioScore * 0.28);
+      const sizeScore = 1 - Math.min(1, Math.abs((area / frameArea) - 0.18) / 0.28);
+      const score = area * (0.55 + Math.max(0, centerBias) * 0.24 + ratioScore * 0.5 + sizeScore * 0.16);
 
-      if (approx.rows >= 4 && approx.rows <= 8 && ratio > 0.48 && ratio < 0.86) {
-        const points = [];
+      if (approx.rows >= 4 && approx.rows <= 12 && ratio > 0.38 && ratio < 0.9) {
+        let points = rotatedRectPoints(rotated) || [];
         if (approx.rows === 4) {
+          points = [];
           for (let j = 0; j < 4; j += 1) {
             points.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
           }
@@ -1119,7 +1386,7 @@ function detectCardRect() {
     console.warn('OpenCV detection failed:', err);
     return null;
   } finally {
-    [src, gray, blur, edges, dilated, hierarchy, kernel].forEach(mat => {
+    [src, gray, blur, edges, closed, dilated, hierarchy, kernel].forEach(mat => {
       try { if (mat) mat.delete(); } catch {}
     });
     try { if (contours) contours.delete(); } catch {}
@@ -1141,15 +1408,28 @@ function detectionSimilarity(a, b) {
   return centerDelta < 0.055 && widthDelta < 0.12 && heightDelta < 0.12;
 }
 
+function centeredCardRect(width, height, widthRatio = 0.68, heightRatio = 0.86) {
+  const maxWidth = width * widthRatio;
+  const maxHeight = height * heightRatio;
+  let cardWidth = maxWidth;
+  let cardHeight = cardWidth / CARD_ASPECT_RATIO;
+  if (cardHeight > maxHeight) {
+    cardHeight = maxHeight;
+    cardWidth = cardHeight * CARD_ASPECT_RATIO;
+  }
+
+  return {
+    x: Math.round((width - cardWidth) / 2),
+    y: Math.round((height - cardHeight) / 2),
+    width: Math.round(cardWidth),
+    height: Math.round(cardHeight)
+  };
+}
+
 function getGuideFrameVideoRect() {
   const vw = els.video.videoWidth || 1280;
   const vh = els.video.videoHeight || 720;
-  return {
-    x: Math.round(vw * 0.11),
-    y: Math.round(vh * 0.12),
-    width: Math.round(vw * 0.78),
-    height: Math.round(vh * 0.76)
-  };
+  return centeredCardRect(vw, vh, 0.68, 0.86);
 }
 
 function getNumberStripRect(cardRect) {
@@ -1178,6 +1458,7 @@ function getNameStripRect(cardRect) {
 
 function drawGuideOcrOverlay(state = 'ready') {
   resizeOverlay();
+  resetGuideFramePosition();
   const ctx = els.detectCanvas.getContext('2d');
   ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
 
@@ -1223,24 +1504,47 @@ function drawGuideOcrOverlay(state = 'ready') {
 function processDetectionTick() {
   const now = Date.now();
   const detected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
+  const canPreviewVisual = !isOcrBusy && now - lastFastVisualTick >= FAST_VISUAL_EVERY_MS;
 
   if (!detected) {
     latestDetection = null;
     stableFrames = 0;
     stableSince = 0;
+
+    if (isScanLocked()) {
+      if (now - lastLockSeenAt > LOCK_LOST_MS) {
+        releaseScanLock();
+        drawGuideOcrOverlay('seeking');
+        setStatus('seeking', '카드 없음');
+        lastOverlayState = 'seeking';
+      } else {
+        drawGuideOcrOverlay(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+        setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+      }
+      els.detectStatus.textContent = '락온';
+      return;
+    }
+
     if (!isOcrBusy) {
-      const idleState = currentCard ? 'complete' : 'ready';
+      const idleState = currentCard ? 'complete' : (lastOverlayState === 'candidate' ? 'candidate' : 'ready');
+      const detail = currentCard ? `${currentCard.number} · 카드 대기` : (idleState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
       drawGuideOcrOverlay(idleState);
       els.detectStatus.textContent = '가이드 스캔';
-      setStatus(idleState, currentCard ? currentCard.number : '이름/번호 맞추기');
+      setStatus(idleState, detail);
       lastOverlayState = idleState;
     }
-    if (!isOcrBusy && now >= ocrCooldownUntil) {
+    if (!currentCard && canPreviewVisual) {
+      lastFastVisualTick = now;
+      previewVisualCandidates(null, '가이드 이미지 후보');
+    }
+    if (!currentCard && !isOcrBusy && now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
       ocrImageFromDetection(null);
     }
     return;
   }
+
+  if (reviewLockedCard(detected, now)) return;
 
   latestDetection = detected;
   const similar = detectionSimilarity(detected, lastDetection);
@@ -1257,9 +1561,14 @@ function processDetectionTick() {
 
   if (!isStable) {
     els.detectStatus.textContent = '가이드 스캔';
-    setStatus('ready', '이름/번호 맞추기');
-    drawDetectedOverlay(detected, 'ready');
-    lastOverlayState = 'ready';
+    const trackingState = lastOverlayState === 'candidate' ? 'candidate' : 'ready';
+    setStatus(trackingState, trackingState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
+    drawDetectedOverlay(detected, trackingState);
+    lastOverlayState = trackingState;
+    if (canPreviewVisual) {
+      lastFastVisualTick = now;
+      previewVisualCandidates(detected, '외곽선 이미지 후보');
+    }
     if (now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
       ocrImageFromDetection(detected);
@@ -1274,8 +1583,13 @@ function processDetectionTick() {
     return;
   }
 
-  drawDetectedOverlay(detected, lastOverlayState === 'complete' ? 'complete' : 'ready');
+  const stableState = ['complete', 'candidate', 'noPrice'].includes(lastOverlayState) ? lastOverlayState : 'ready';
+  drawDetectedOverlay(detected, stableState);
   els.detectStatus.textContent = '가이드 스캔';
+  if (canPreviewVisual) {
+    lastFastVisualTick = now;
+    previewVisualCandidates(detected, '안정화 이미지 후보');
+  }
 
   if (now >= ocrCooldownUntil) {
     ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1392,7 +1706,7 @@ function captureNameFromGuide() {
   return cardCanvas ? cropNameStrip(cardCanvas) : null;
 }
 
-function captureNumberFromQuad(points) {
+function captureCardFromQuad(points) {
   if (!cvReady || !points || points.length !== 4) return null;
   const ordered = orderQuadPoints(points);
   if (!ordered) return null;
@@ -1423,7 +1737,7 @@ function captureNumberFromQuad(points) {
     matrix = cv.getPerspectiveTransform(srcTri, dstTri);
     cv.warpPerspective(src, dst, matrix, new cv.Size(targetWidth, targetHeight), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
     cv.imshow(warped, dst);
-    return cropNumberStrip(warped);
+    return warped;
   } catch (err) {
     console.warn('Perspective crop failed:', err);
     return null;
@@ -1434,16 +1748,16 @@ function captureNumberFromQuad(points) {
   }
 }
 
-function captureNumberFromRect(rect) {
+function captureCardFromRect(rect) {
   if (!rect) return null;
   const canvas = getFrameCanvasFull();
   const vw = canvas.width;
   const vh = canvas.height;
   const inner = {
-    x: rect.x + rect.width * 0.08,
-    y: rect.y + rect.height * 0.08,
-    width: rect.width * 0.84,
-    height: rect.height * 0.82
+    x: rect.x + rect.width * 0.03,
+    y: rect.y + rect.height * 0.03,
+    width: rect.width * 0.94,
+    height: rect.height * 0.94
   };
 
   const sx = Math.max(0, Math.round(inner.x));
@@ -1456,6 +1770,22 @@ function captureNumberFromRect(rect) {
   cardCanvas.width = sw;
   cardCanvas.height = sh;
   cardCanvas.getContext('2d', { willReadFrequently: true }).drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cardCanvas;
+}
+
+function captureCardFromDetection(detection) {
+  return captureCardFromQuad(detection?.points) ||
+    captureCardFromRect(detection?.rect);
+}
+
+function captureNumberFromQuad(points) {
+  const cardCanvas = captureCardFromQuad(points);
+  return cardCanvas ? cropNumberStrip(cardCanvas) : null;
+}
+
+function captureNumberFromRect(rect) {
+  const cardCanvas = captureCardFromRect(rect);
+  if (!cardCanvas) return null;
   return cropNumberStrip(cardCanvas);
 }
 
@@ -1472,12 +1802,7 @@ function preparePhotoCardCanvas(img) {
   full.height = h;
   full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
 
-  const cardRect = {
-    x: Math.round(w * 0.08),
-    y: Math.round(h * 0.08),
-    width: Math.round(w * 0.84),
-    height: Math.round(h * 0.84)
-  };
+  const cardRect = centeredCardRect(w, h, 0.82, 0.9);
   const sx = Math.max(0, cardRect.x);
   const sy = Math.max(0, cardRect.y);
   const sw = Math.min(w - sx, cardRect.width);
@@ -1500,12 +1825,21 @@ function preparePhotoOcrRegions(img) {
 }
 
 function captureOcrRegion(detection) {
-  return captureNumberFromGuide() ||
-    captureNumberFromQuad(detection?.points) ||
-    captureNumberFromRect(detection?.rect);
+  return captureNumberFromQuad(detection?.points) ||
+    captureNumberFromRect(detection?.rect) ||
+    captureNumberFromGuide();
 }
 
 function captureOcrRegions(detection) {
+  const detectedCardCanvas = captureCardFromDetection(detection);
+  if (detectedCardCanvas) {
+    return {
+      cardFrame: detectedCardCanvas,
+      numberFrame: cropNumberStrip(detectedCardCanvas),
+      nameFrame: cropNameStrip(detectedCardCanvas)
+    };
+  }
+
   const guideCardCanvas = captureCardCanvasFromGuide();
   if (guideCardCanvas) {
     return {
@@ -1553,10 +1887,12 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     const visualCandidates = scoreVisualCandidates(cardFrame);
     const visualOptions = {
       ...options,
-      visualIndexActive: Boolean(visualIndex.length && cardFrame)
+      visualIndexActive: Boolean(visualIndex.length && cardFrame),
+      cardFrame
     };
+    updateDebugView(cardFrame, visualCandidates, visualCandidates.length ? 'visual 후보' : 'visual 후보 없음');
 
-    if (visualCandidates[0]?.visualScore >= VISUAL_DIRECT_SCORE) {
+    if (isClearVisualCandidate(visualCandidates)) {
       consecutiveNumberMisses = 0;
       handleOcrCandidates(visualCandidates, detection, 'visual match', {
         ...visualOptions,
@@ -1582,6 +1918,7 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     const nameTask = startNameMatchOcr(nameFrame);
     const numberText = await runNumberOcr(numberFrame);
     const numberOnlyCandidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText }));
+    updateDebugView(cardFrame, numberOnlyCandidates, 'visual + 번호 후보');
     const numberTop = numberOnlyCandidates[0];
     if (numberTop?.numberScore >= CLEAR_NUMBER_SCORE && (!visualOptions.visualIndexActive || numberTop.visualScore >= VISUAL_OCR_LOCK_FLOOR)) {
       consecutiveNumberMisses = 0;
@@ -1600,6 +1937,7 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     }
 
     const candidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText, nameText }));
+    updateDebugView(cardFrame, candidates, 'visual + OCR 후보');
     if (candidates.length) {
       consecutiveNumberMisses = 0;
       const rawText = [numberText, nameText].filter(Boolean).join('\n');
@@ -1638,6 +1976,10 @@ async function ocrImageFromDetection(detection) {
 }
 
 function handleOcrFailure(statusKey, detail, detection, rawText) {
+  if (isScanLocked()) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return;
+  }
   console.log('OCR miss:', statusKey, detail, rawText);
   ocrCandidateId = null;
   ocrCandidateCount = 0;
@@ -1649,6 +1991,10 @@ function handleOcrFailure(statusKey, detail, detection, rawText) {
 }
 
 function handleOcrCandidates(candidates, detection, rawText, options = {}) {
+  if (isScanLocked()) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return;
+  }
   const voted = updateCandidateVotes(candidates);
   const display = voted.length ? voted : candidates.slice(0, 3);
   const top = display[0];
@@ -1658,7 +2004,7 @@ function handleOcrCandidates(candidates, detection, rawText, options = {}) {
   }
 
   const clearNumber = top.numberScore >= CLEAR_NUMBER_SCORE;
-  const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE;
+  const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE && visualMargin(display) >= VISUAL_MARGIN_LOCK;
   const stableVote = top.votes >= 2 && top.score >= 58;
   const visualGate = options.visualIndexActive && top.visualScore < VISUAL_OCR_LOCK_FLOOR && !clearVisual;
   const highConfidence = !visualGate && (top.score >= DIRECT_SCORE || clearNumber || clearVisual || stableVote);
@@ -1701,7 +2047,9 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
     return;
   }
 
-  confirmCard(card, 'scan');
+  const thumbCanvas = options.cardFrame || captureCardFromDetection(detection);
+  confirmCard(card, 'scan', thumbCanvas);
+  lockScan(card);
   clearCandidateVotes();
   if (detection) drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   else drawGuideOcrOverlay(priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
@@ -1710,7 +2058,8 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
   console.log('Detected:', card.card_id, rawText);
 }
 
-function confirmCard(card, source = 'scan') {
+function confirmCard(card, source = 'scan', thumbCanvas = null) {
+  rememberScanThumbnail(card, thumbCanvas);
   renderCard(card);
   addRecentScan(card, source);
   renderRecentScans();
@@ -1754,6 +2103,7 @@ function stopCamera() {
   clearOverlay();
   latestDetection = null;
   lastDetection = null;
+  releaseScanLock();
   stableFrames = 0;
   stableSince = 0;
   els.detectStatus.textContent = cvReady ? '외곽선 준비' : '대기';
@@ -1764,6 +2114,7 @@ function resetScan() {
   currentCard = null;
   ocrCandidateId = null;
   ocrCandidateCount = 0;
+  releaseScanLock();
   clearCandidateVotes();
   lastOverlayState = 'seeking';
   renderEmpty('seeking');

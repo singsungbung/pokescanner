@@ -10,6 +10,7 @@
   <script defer src="data/cards.js"></script>
   <script defer src="data/prices.js"></script>
   <script defer src="data/visual-index.js"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script defer src="app.js"></script>
 </head>
@@ -34,7 +35,7 @@
       <div class="camera-placeholder" id="cameraPlaceholder">
         <div class="big-icon">M1S</div>
         <p>카메라를 켜고 카드를 비춰줘</p>
-        <small>카드 이름과 하단 번호를 가이드 안에 맞추면 바로 읽습니다.</small>
+        <small>카드를 가이드 안에 맞추면 이미지로 먼저 비교합니다.</small>
       </div>
       <div class="guide-frame" id="guideFrame" aria-hidden="true">
         <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
@@ -108,6 +109,14 @@
       <button id="openYahoo" type="button">Yahoo 낙찰</button>
       <button id="openGoogle" type="button">Google</button>
     </section>
+
+    <details class="debug-panel" id="debugPanel">
+      <summary>스캔 진단</summary>
+      <div class="debug-grid">
+        <canvas id="debugCrop" width="126" height="176"></canvas>
+        <div class="debug-scores" id="debugScores">아직 분석 없음</div>
+      </div>
+    </details>
 
     <section class="history-panel">
       <h2>최근 스캔 기록</h2>
