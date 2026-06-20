@@ -1,4 +1,4 @@
-const CACHE = 'm1s-scanner-v9';
+const CACHE = 'm1s-scanner-v10';
 const ASSETS = [
   './',
   './index.html',

@@ -38,6 +38,8 @@ const els = {
   candidatePanel: $('candidatePanel'),
   candidateTitle: $('candidateTitle'),
   candidateList: $('candidateList'),
+  debugCrop: $('debugCrop'),
+  debugScores: $('debugScores'),
   thumb: $('thumb'),
   addCollection: $('addCollection'),
   collectionCondition: $('collectionCondition'),
@@ -99,6 +101,7 @@ const STABLE_MS = 550;
 const OCR_COOLDOWN_MS = 1700;
 const RECENT_DEDUPE_MS = 30000;
 const USE_BOX_TRACKING = false;
+const CARD_ASPECT_RATIO = 63 / 88;
 const VOTE_WINDOW = 10;
 const VOTE_MAX_AGE_MS = 18000;
 const DIRECT_SCORE = 74;
@@ -107,6 +110,7 @@ const CLEAR_NUMBER_SCORE = 56;
 const VISUAL_DIRECT_SCORE = 62;
 const VISUAL_CANDIDATE_SCORE = 40;
 const VISUAL_OCR_LOCK_FLOOR = 28;
+const VISUAL_MARGIN_LOCK = 6;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -660,8 +664,8 @@ function scoreVisualFeature(feature, entry) {
   const fullHash = entry.hash || entry.full_hash || entry.visual_hash;
   const artHash = entry.artHash || entry.art_hash || entry.artwork_hash;
   const colors = entry.color || entry.color_grid || entry.layout_color;
-  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 35);
-  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 25);
+  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 25);
+  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 35);
   const colorScore = Math.round(colorSimilarity(feature.color, colors) * 10);
   const visualScore = fullScore + artScore + colorScore;
   return {
@@ -699,6 +703,40 @@ function scoreVisualCandidates(cardCanvas) {
     .filter(item => item.visualScore >= VISUAL_CANDIDATE_SCORE)
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
+}
+
+function visualMargin(candidates) {
+  if (!candidates?.length) return 0;
+  return (candidates[0].visualScore || 0) - (candidates[1]?.visualScore || 0);
+}
+
+function isClearVisualCandidate(candidates) {
+  const top = candidates?.[0];
+  return Boolean(top) &&
+    top.visualScore >= VISUAL_DIRECT_SCORE &&
+    visualMargin(candidates) >= VISUAL_MARGIN_LOCK;
+}
+
+function updateDebugView(cardCanvas, candidates = [], label = '') {
+  if (els.debugCrop && cardCanvas) {
+    const ctx = els.debugCrop.getContext('2d');
+    ctx.clearRect(0, 0, els.debugCrop.width, els.debugCrop.height);
+    ctx.drawImage(cardCanvas, 0, 0, els.debugCrop.width, els.debugCrop.height);
+  }
+
+  if (!els.debugScores) return;
+  if (!candidates.length) {
+    els.debugScores.textContent = label || '후보 없음';
+    return;
+  }
+
+  els.debugScores.innerHTML = candidates.slice(0, 5).map((item, index) => `
+    <div class="debug-score-row">
+      <strong>${index + 1}. ${item.card.number} ${item.card.name_jp}</strong>
+      <small>총 ${item.score} · 이미지 ${item.visualScore || 0} · art ${item.artworkScore || 0} · color ${item.layoutColorScore || 0}</small>
+      <small>번호 ${item.numberScore || 0} · 이름 ${item.nameScore || 0} · margin ${index === 0 ? visualMargin(candidates) : '-'}</small>
+    </div>
+  `).join('');
 }
 
 function mergeVisualAndOcrCandidates(visualCandidates, ocrCandidates) {
@@ -1139,15 +1177,28 @@ function detectionSimilarity(a, b) {
   return centerDelta < 0.055 && widthDelta < 0.12 && heightDelta < 0.12;
 }
 
+function centeredCardRect(width, height, widthRatio = 0.68, heightRatio = 0.86) {
+  const maxWidth = width * widthRatio;
+  const maxHeight = height * heightRatio;
+  let cardWidth = maxWidth;
+  let cardHeight = cardWidth / CARD_ASPECT_RATIO;
+  if (cardHeight > maxHeight) {
+    cardHeight = maxHeight;
+    cardWidth = cardHeight * CARD_ASPECT_RATIO;
+  }
+
+  return {
+    x: Math.round((width - cardWidth) / 2),
+    y: Math.round((height - cardHeight) / 2),
+    width: Math.round(cardWidth),
+    height: Math.round(cardHeight)
+  };
+}
+
 function getGuideFrameVideoRect() {
   const vw = els.video.videoWidth || 1280;
   const vh = els.video.videoHeight || 720;
-  return {
-    x: Math.round(vw * 0.11),
-    y: Math.round(vh * 0.12),
-    width: Math.round(vw * 0.78),
-    height: Math.round(vh * 0.76)
-  };
+  return centeredCardRect(vw, vh, 0.68, 0.86);
 }
 
 function getNumberStripRect(cardRect) {
@@ -1470,12 +1521,7 @@ function preparePhotoCardCanvas(img) {
   full.height = h;
   full.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
 
-  const cardRect = {
-    x: Math.round(w * 0.08),
-    y: Math.round(h * 0.08),
-    width: Math.round(w * 0.84),
-    height: Math.round(h * 0.84)
-  };
+  const cardRect = centeredCardRect(w, h, 0.82, 0.9);
   const sx = Math.max(0, cardRect.x);
   const sy = Math.max(0, cardRect.y);
   const sw = Math.min(w - sx, cardRect.width);
@@ -1553,8 +1599,9 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
       ...options,
       visualIndexActive: Boolean(visualIndex.length && cardFrame)
     };
+    updateDebugView(cardFrame, visualCandidates, visualCandidates.length ? 'visual 후보' : 'visual 후보 없음');
 
-    if (visualCandidates[0]?.visualScore >= VISUAL_DIRECT_SCORE) {
+    if (isClearVisualCandidate(visualCandidates)) {
       consecutiveNumberMisses = 0;
       handleOcrCandidates(visualCandidates, detection, 'visual match', {
         ...visualOptions,
@@ -1580,6 +1627,7 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     const nameTask = startNameMatchOcr(nameFrame);
     const numberText = await runNumberOcr(numberFrame);
     const numberOnlyCandidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText }));
+    updateDebugView(cardFrame, numberOnlyCandidates, 'visual + 번호 후보');
     const numberTop = numberOnlyCandidates[0];
     if (numberTop?.numberScore >= CLEAR_NUMBER_SCORE && (!visualOptions.visualIndexActive || numberTop.visualScore >= VISUAL_OCR_LOCK_FLOOR)) {
       consecutiveNumberMisses = 0;
@@ -1598,6 +1646,7 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     }
 
     const candidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText, nameText }));
+    updateDebugView(cardFrame, candidates, 'visual + OCR 후보');
     if (candidates.length) {
       consecutiveNumberMisses = 0;
       const rawText = [numberText, nameText].filter(Boolean).join('\n');
@@ -1656,7 +1705,7 @@ function handleOcrCandidates(candidates, detection, rawText, options = {}) {
   }
 
   const clearNumber = top.numberScore >= CLEAR_NUMBER_SCORE;
-  const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE;
+  const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE && visualMargin(display) >= VISUAL_MARGIN_LOCK;
   const stableVote = top.votes >= 2 && top.score >= 58;
   const visualGate = options.visualIndexActive && top.visualScore < VISUAL_OCR_LOCK_FLOOR && !clearVisual;
   const highConfidence = !visualGate && (top.score >= DIRECT_SCORE || clearNumber || clearVisual || stableVote);
