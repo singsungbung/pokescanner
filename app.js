@@ -35,6 +35,9 @@ const els = {
   psaPrice: $('psaPrice'),
   priceUpdated: $('priceUpdated'),
   priceConfidence: $('priceConfidence'),
+  candidatePanel: $('candidatePanel'),
+  candidateTitle: $('candidateTitle'),
+  candidateList: $('candidateList'),
   thumb: $('thumb'),
   addCollection: $('addCollection'),
   collectionCondition: $('collectionCondition'),
@@ -70,6 +73,7 @@ const STATUS = {
   stabilizing: '카드 안정화 중',
   ready: 'OCR 대기',
   ocr: 'OCR 인식 중',
+  candidate: '후보 확인',
   complete: '인식 완료',
   failed: '인식 실패',
   missing: 'DB에 없는 카드',
@@ -78,13 +82,14 @@ const STATUS = {
 
 const OVERLAY_COLORS = {
   seeking: '#ff5d72',
-  stabilizing: '#ff5d72',
+  stabilizing: '#ffbd4a',
   ocr: '#ffbd4a',
-  ready: '#ffbd4a',
-  complete: '#42df87',
+  ready: '#ff5d72',
+  candidate: '#ffbd4a',
+  complete: '#4aa3ff',
   failed: '#ff5d72',
   missing: '#ff5d72',
-  noPrice: '#ffbd4a'
+  noPrice: '#4aa3ff'
 };
 
 const DETECT_EVERY_MS = 420;
@@ -93,6 +98,11 @@ const STABLE_MS = 550;
 const OCR_COOLDOWN_MS = 1700;
 const RECENT_DEDUPE_MS = 30000;
 const USE_BOX_TRACKING = false;
+const VOTE_WINDOW = 10;
+const VOTE_MAX_AGE_MS = 18000;
+const DIRECT_SCORE = 74;
+const CANDIDATE_SCORE = 38;
+const CLEAR_NUMBER_SCORE = 56;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -114,6 +124,7 @@ let ocrCandidateId = null;
 let ocrCandidateCount = 0;
 let lastOverlayState = 'seeking';
 let consecutiveNumberMisses = 0;
+let ocrVotes = [];
 
 const recentStorageKey = 'm1s_recent_scans_v1';
 const collectionStorageKey = 'm1s_collection_v3';
@@ -136,11 +147,24 @@ function setStatus(key, detail = '') {
   if (els.resultStatus) els.resultStatus.textContent = text;
   const guideCopy = els.guideFrame?.querySelector('.guide-copy');
   if (guideCopy) guideCopy.textContent = text;
-  setGuideColor(OVERLAY_COLORS[key] || OVERLAY_COLORS.seeking);
+  setGuideColor(OVERLAY_COLORS[key] || OVERLAY_COLORS.seeking, key);
 }
 
-function setGuideColor(color) {
+function setGuideColor(color, state = '') {
   if (!els.guideFrame) return;
+  els.guideFrame.style.setProperty('--guide-color', color);
+  els.guideFrame.classList.remove(
+    'state-seeking',
+    'state-ready',
+    'state-stabilizing',
+    'state-ocr',
+    'state-candidate',
+    'state-complete',
+    'state-failed',
+    'state-missing',
+    'state-noPrice'
+  );
+  if (state) els.guideFrame.classList.add(`state-${state}`);
   els.guideFrame.querySelectorAll('.corner').forEach(corner => {
     corner.style.borderColor = color;
   });
@@ -157,6 +181,7 @@ function priceFor(card) {
 function renderEmpty(statusKey = 'seeking') {
   currentCard = null;
   els.resultCard?.classList.add('is-empty');
+  hideCandidates();
   els.cardName.textContent = '카드를 스캔하거나 검색';
   els.cardSet.textContent = `${selectedSet.language} · ${selectedSet.set_code} ${selectedSet.set_name_ko}`;
   els.cardNumber.textContent = '—';
@@ -177,6 +202,7 @@ function renderCard(card) {
   const hasPrice = priceHasValue(price);
 
   els.resultCard?.classList.remove('is-empty');
+  hideCandidates();
   els.cardName.textContent = card.name_jp;
   els.cardSet.textContent = `${card.language} · ${card.set_code} ${card.set_name_ko}`;
   els.cardNumber.textContent = card.number;
@@ -194,27 +220,184 @@ function renderCard(card) {
         ? 'linear-gradient(145deg,#ffffff,#d7e4ff 50%,#ffd166)'
         : card.rarity === 'AR'
           ? 'linear-gradient(145deg,#fff2c4,#a7e6ff 52%,#ffd166)'
-          : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+        : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+}
+
+function hideCandidates() {
+  els.candidatePanel?.classList.add('is-collapsed');
+  if (els.candidateList) els.candidateList.innerHTML = '';
+}
+
+function candidateThumbText(card) {
+  return `${card.rarity}\n${pad3(card.index)}`;
+}
+
+function renderCandidateCards(candidates, detail = '') {
+  if (!els.candidatePanel || !els.candidateList) return;
+  const top = candidates[0];
+  if (!top) {
+    hideCandidates();
+    return;
+  }
+
+  els.resultCard?.classList.remove('is-empty');
+  els.candidatePanel.classList.remove('is-collapsed');
+  els.candidateTitle.textContent = detail || `이 카드일 가능성이 높음 · ${top.score}점`;
+  els.candidateList.innerHTML = '';
+
+  for (const item of candidates.slice(0, 3)) {
+    const card = item.card;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'candidate-item';
+    const thumb = card.local_image_path || card.image_url
+      ? `<img src="${card.local_image_path || card.image_url}" alt="">`
+      : `<span>${candidateThumbText(card)}</span>`;
+    row.innerHTML = `
+      <span class="candidate-thumb">${thumb}</span>
+      <span class="candidate-main">
+        <strong>${card.name_jp}</strong>
+        <small>${card.name_ko} · ${card.name_en}</small>
+        <small>${card.number} · ${card.rarity}</small>
+      </span>
+      <span class="candidate-score">
+        <strong>${item.score}</strong>
+        <small>번호 ${item.numberScore} · 이름 ${item.nameScore} · ${item.votes || 1}표</small>
+      </span>
+    `;
+    row.addEventListener('click', () => {
+      clearCandidateVotes();
+      confirmCard(card, 'candidate');
+      hideCandidates();
+    });
+    els.candidateList.appendChild(row);
+  }
 }
 
 function normalizeText(raw) {
   return (raw || '')
+    .normalize('NFKC')
     .replace(/[ＯｏO]/g, '0')
-    .replace(/[Ｉｌl]/g, '1')
+    .replace(/[Ｉｌl|!]/g, '1')
     .replace(/[／]/g, '/')
     .replace(/[ー－—]/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function normalizeOcrText(raw) {
-  return normalizeText(raw)
+function normalizeNumberOcr(raw) {
+  return (raw || '')
+    .normalize('NFKC')
+    .replace(/[OoＯｏ]/g, '0')
+    .replace(/[IiＩｉLlｌ|!！]/g, '1')
+    .replace(/[SsＳｓ]/g, '5')
+    .replace(/[ZzＺｚ]/g, '2')
+    .replace(/[BbＢｂ]/g, '8')
+    .replace(/[GgＧｇ]/g, '6')
+    .replace(/[／\\]/g, '/')
     .replace(/[^0-9/]/g, '')
     .replace(/\/+/g, '/');
 }
 
+function normalizeOcrText(raw) {
+  return normalizeNumberOcr(raw);
+}
+
+function levenshteinDistance(a, b) {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = Array(b.length + 1).fill(0);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        curr[j - 1] + 1,
+        prev[j] + 1,
+        prev[j - 1] + cost
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function stringSimilarity(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const distance = levenshteinDistance(a, b);
+  return Math.max(0, 1 - distance / Math.max(a.length, b.length));
+}
+
+function canonicalNumber(index, denominator) {
+  if (!Number.isFinite(index) || !Number.isFinite(denominator) || index < 1 || denominator < 1) return '';
+  return `${pad3(index)}/${pad3(denominator)}`;
+}
+
+function numberPartsFromCompact(compact) {
+  if (!compact) return [];
+  const found = [];
+  const seen = new Set();
+  const add = (indexText, denominatorText) => {
+    const index = Number(indexText);
+    const denominator = Number(denominatorText);
+    if (!Number.isInteger(index) || !Number.isInteger(denominator) || index < 1 || index > 999 || denominator < 0) return;
+    const key = `${index}/${denominator}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      found.push({ index, denominator });
+    }
+  };
+
+  let hasSlashNumber = false;
+  for (const match of compact.matchAll(/(\d{1,3})\/(\d{1,3})/g)) {
+    hasSlashNumber = true;
+    add(match[1], match[2]);
+  }
+
+  const digits = compact.replace(/\D/g, '');
+  if (!hasSlashNumber && digits.length >= 4 && digits.length <= 6) {
+    add(digits.slice(0, -3), digits.slice(-3));
+    add(digits.slice(0, -2), digits.slice(-2));
+  }
+  if (digits.length >= 1 && digits.length <= 3) {
+    add(digits, '0');
+  }
+  return found;
+}
+
+function numberFormsFromText(raw) {
+  const compact = normalizeNumberOcr(raw);
+  const forms = new Set();
+  if (compact) forms.add(compact);
+  for (const part of numberPartsFromCompact(compact)) {
+    if (part.denominator > 0) {
+      forms.add(canonicalNumber(part.index, part.denominator));
+      forms.add(`${part.index}/${part.denominator}`);
+    }
+    if (part.denominator === 0) forms.add(pad3(part.index));
+  }
+  return [...forms].filter(Boolean);
+}
+
+function cardNumberForms(card) {
+  const forms = new Set();
+  [card.number, card.collector_number, `${card.index}/92`, `${pad3(card.index)}/063`].forEach(value => {
+    const compact = normalizeNumberOcr(value);
+    if (compact) forms.add(compact);
+    for (const part of numberPartsFromCompact(compact)) {
+      forms.add(canonicalNumber(part.index, part.denominator));
+      forms.add(`${part.index}/${part.denominator}`);
+    }
+  });
+  return [...forms].filter(Boolean);
+}
+
 function parseCardNumber(raw, options = {}) {
-  const compact = normalizeOcrText(raw);
+  const compact = normalizeNumberOcr(raw);
   let match = options.strict
     ? compact.match(/(\d{2,3})\/(063|092|63|92)/)
     : compact.match(/(\d{1,3})\/(0?63|0?92)/);
@@ -245,6 +428,33 @@ function findCardByParsedNumber(parsed) {
   )) || null;
 }
 
+function scoreNumberMatch(rawText, card) {
+  const observed = numberFormsFromText(rawText);
+  if (!observed.length) return 0;
+  const targets = cardNumberForms(card);
+  let best = 0;
+
+  for (const source of observed) {
+    const sourceParts = numberPartsFromCompact(source);
+    for (const target of targets) {
+      if (!source || !target) continue;
+      if (source === target) best = Math.max(best, 60);
+      best = Math.max(best, Math.round(stringSimilarity(source, target) * 60));
+
+      const targetParts = numberPartsFromCompact(target);
+      for (const sp of sourceParts) {
+        for (const tp of targetParts) {
+          if (sp.index === tp.index) {
+            if (sp.denominator === 0) best = Math.max(best, 45);
+            else best = Math.max(best, sp.denominator === tp.denominator ? 60 : 50);
+          }
+        }
+      }
+    }
+  }
+  return Math.min(60, best);
+}
+
 function findCardForSearch(raw) {
   const query = normalizeText(raw).toLowerCase();
   if (!query) return null;
@@ -252,6 +462,11 @@ function findCardForSearch(raw) {
   const parsed = parseCardNumber(query);
   const cardByNumber = findCardByParsedNumber(parsed);
   if (cardByNumber) return cardByNumber;
+
+  const fuzzy = scoreOcrCandidates({ numberText: query, nameText: query })[0];
+  if (fuzzy && (fuzzy.score >= CANDIDATE_SCORE || fuzzy.numberScore >= 45 || fuzzy.nameScore >= 18)) {
+    return fuzzy.card;
+  }
 
   return selectedCards().find(card => {
     const fields = [
@@ -263,24 +478,49 @@ function findCardForSearch(raw) {
 }
 
 function normalizeForNameMatch(raw) {
-  return normalizeText(raw)
+  return (raw || '')
+    .normalize('NFKC')
     .toLowerCase()
+    .replace(/[0０]/g, 'o')
+    .replace(/[1１|!！]/g, 'l')
+    .replace(/[5５]/g, 's')
+    .replace(/[2２]/g, 'z')
+    .replace(/[8８]/g, 'b')
+    .replace(/[6６]/g, 'g')
     .replace(/[^\p{L}\p{N}ぁ-ゟ゠-ヿ一-龯가-힣]/gu, '');
+}
+
+function nameFormsForCard(card) {
+  const rawFields = [
+    card.name_jp,
+    card.name_ko,
+    card.name_en
+  ].filter(Boolean);
+  const forms = new Set();
+  for (const field of rawFields) {
+    const normalized = normalizeForNameMatch(field);
+    if (!normalized || /^\d/.test(normalized)) continue;
+    forms.add(normalized);
+    forms.add(normalized.replace(/^(mega|メガ|메가)/, '').replace(/ex$/, ''));
+    String(field).split(/[\s'’・の]+/).forEach(part => {
+      const token = normalizeForNameMatch(part);
+      if (token.length >= 3) forms.add(token);
+    });
+  }
+  return [...forms].filter(value => value.length >= 2);
 }
 
 function scoreNameMatch(rawText, card) {
   const text = normalizeForNameMatch(rawText);
   if (!text) return 0;
-  const fields = [card.name_jp, card.name_en, card.name_ko, ...(card.search_keywords || [])]
-    .filter(Boolean)
-    .map(normalizeForNameMatch)
-    .filter(value => value.length >= 3);
+  const fields = nameFormsForCard(card);
 
   let best = 0;
   for (const field of fields) {
     if (!field) continue;
-    if (text.includes(field)) best = Math.max(best, 120 + field.length);
-    if (field.includes(text) && text.length >= 3) best = Math.max(best, 90 + text.length);
+    if (field.length >= 3 && text.includes(field)) best = Math.max(best, 30);
+    if (field.includes(text) && text.length >= 2) best = Math.max(best, Math.min(30, 20 + text.length));
+    best = Math.max(best, Math.round(stringSimilarity(text, field) * 30));
 
     let ordered = 0;
     let pos = 0;
@@ -292,18 +532,107 @@ function scoreNameMatch(rawText, card) {
       }
     }
     if (field.length >= 4) {
-      best = Math.max(best, Math.round((ordered / field.length) * 80));
+      best = Math.max(best, Math.round((ordered / field.length) * 24));
     }
   }
-  return best;
+  return Math.min(30, best);
 }
 
 function findCardByNameText(rawText) {
   const scored = selectedCards()
     .map(card => ({ card, score: scoreNameMatch(rawText, card) }))
-    .filter(item => item.score >= 68)
+    .filter(item => item.score >= 16)
     .sort((a, b) => b.score - a.score);
   return scored[0]?.card || null;
+}
+
+function scoreOcrCandidate(card, numberText = '', nameText = '') {
+  const numberScore = scoreNumberMatch(numberText, card);
+  const nameScore = scoreNameMatch(nameText, card);
+  const setBonus = (numberScore > 0 || nameScore > 0) ? 10 : 0;
+  const score = Math.min(100, numberScore + nameScore + setBonus);
+  return { card, score, numberScore, nameScore, setBonus, votes: 0 };
+}
+
+function scoreOcrCandidates({ numberText = '', nameText = '' } = {}) {
+  return selectedCards()
+    .map(card => scoreOcrCandidate(card, numberText, nameText))
+    .filter(item => item.score >= CANDIDATE_SCORE || item.numberScore >= 45 || item.nameScore >= 18)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.numberScore !== a.numberScore) return b.numberScore - a.numberScore;
+      return b.nameScore - a.nameScore;
+    })
+    .slice(0, 6);
+}
+
+function updateCandidateVotes(candidates) {
+  const now = Date.now();
+  if (candidates?.length) {
+    ocrVotes.push({
+      time: now,
+      candidates: candidates.slice(0, 3).map((item, index) => ({
+        card_id: item.card.card_id,
+        score: item.score,
+        numberScore: item.numberScore,
+        nameScore: item.nameScore,
+        rank: index
+      }))
+    });
+  }
+
+  ocrVotes = ocrVotes
+    .filter(vote => now - vote.time <= VOTE_MAX_AGE_MS)
+    .slice(-VOTE_WINDOW);
+
+  const byCard = new Map();
+  for (const vote of ocrVotes) {
+    for (const item of vote.candidates) {
+      const card = cardById(item.card_id);
+      if (!card) continue;
+      const weight = item.rank === 0 ? 1 : item.rank === 1 ? 0.72 : 0.52;
+      const prev = byCard.get(item.card_id) || {
+        card,
+        scoreTotal: 0,
+        weightedTotal: 0,
+        numberScore: 0,
+        nameScore: 0,
+        bestScore: 0,
+        votes: 0
+      };
+      prev.scoreTotal += item.score;
+      prev.weightedTotal += item.score * weight;
+      prev.numberScore = Math.max(prev.numberScore, item.numberScore);
+      prev.nameScore = Math.max(prev.nameScore, item.nameScore);
+      prev.bestScore = Math.max(prev.bestScore, item.score);
+      prev.votes += 1;
+      byCard.set(item.card_id, prev);
+    }
+  }
+
+  return [...byCard.values()]
+    .map(item => {
+      const voteBonus = Math.min(18, Math.max(0, item.votes - 1) * 6);
+      const average = item.scoreTotal / Math.max(1, item.votes);
+      return {
+        card: item.card,
+        score: Math.min(100, Math.round(Math.max(item.bestScore, average, item.weightedTotal / Math.max(1, item.votes)) + voteBonus)),
+        numberScore: item.numberScore,
+        nameScore: item.nameScore,
+        setBonus: 10,
+        votes: item.votes
+      };
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.votes !== a.votes) return b.votes - a.votes;
+      return b.numberScore - a.numberScore;
+    })
+    .slice(0, 3);
+}
+
+function clearCandidateVotes() {
+  ocrVotes = [];
 }
 
 function searchCards(query) {
@@ -505,7 +834,7 @@ function drawDetectedOverlay(detection, state = 'seeking') {
   if (!detection?.rect) return;
 
   const color = OVERLAY_COLORS[state] || OVERLAY_COLORS.seeking;
-  setGuideColor(color);
+  setGuideColor(color, state);
   ctx.save();
   ctx.lineWidth = 6;
   ctx.strokeStyle = color;
@@ -668,10 +997,20 @@ function drawGuideOcrOverlay(state = 'ready') {
   ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
 
   const color = OVERLAY_COLORS[state] || OVERLAY_COLORS.ready;
-  const guide = getGuideFrameVideoRect();
+  const baseGuide = getGuideFrameVideoRect();
+  const t = Date.now();
+  const breathe = ['ocr', 'candidate'].includes(state)
+    ? Math.sin(t / 120) * 5
+    : Math.sin(t / 420) * 2;
+  const guide = {
+    x: Math.round(baseGuide.x - breathe),
+    y: Math.round(baseGuide.y - breathe),
+    width: Math.round(baseGuide.width + breathe * 2),
+    height: Math.round(baseGuide.height + breathe * 2)
+  };
   const nameStrip = getNameStripRect(guide);
   const strip = getNumberStripRect(guide);
-  setGuideColor(color);
+  setGuideColor(color, state);
 
   ctx.save();
   ctx.lineWidth = 4;
@@ -686,6 +1025,13 @@ function drawGuideOcrOverlay(state = 'ready') {
   ctx.fillStyle = 'rgba(255,189,74,.12)';
   ctx.fillRect(strip.x, strip.y, strip.width, strip.height);
   ctx.strokeRect(strip.x, strip.y, strip.width, strip.height);
+  if (['ocr', 'candidate'].includes(state)) {
+    const progress = (t % 920) / 920;
+    const y = guide.y + guide.height * progress;
+    ctx.globalAlpha = 0.72;
+    ctx.fillStyle = color;
+    ctx.fillRect(guide.x + 8, y, guide.width - 16, 3);
+  }
   ctx.restore();
 }
 
@@ -698,10 +1044,11 @@ function processDetectionTick() {
     stableFrames = 0;
     stableSince = 0;
     if (!isOcrBusy) {
-      drawGuideOcrOverlay('ready');
+      const idleState = currentCard ? 'complete' : 'ready';
+      drawGuideOcrOverlay(idleState);
       els.detectStatus.textContent = 'GUIDE OCR';
-      setStatus('ready', '이름/번호 맞추기');
-      lastOverlayState = 'ready';
+      setStatus(idleState, currentCard ? currentCard.number : '이름/번호 맞추기');
+      lastOverlayState = idleState;
     }
     if (!isOcrBusy && now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1010,42 +1357,45 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     lastOverlayState = 'ocr';
 
     const nameTask = startNameMatchOcr(nameFrame);
-    const text = await runNumberOcr(numberFrame);
-    const parsed = parseCardNumber(text, { strict: true });
-    if (!parsed) {
-      consecutiveNumberMisses += 1;
-      if (nameTask) {
-        setStatus('ocr', '이름/번호 비교 중');
-        const nameResult = await nameTask;
-        if (nameResult?.card) {
-          consecutiveNumberMisses = 0;
-          const rawText = [text, nameResult.text].filter(Boolean).join('\n');
-          handleDetectedCard(nameResult.card, detection, rawText, { ...options, confirmImmediately: true });
-          return;
-        }
-      }
-      handleOcrFailure('failed', '번호 패턴 없음', detection, text);
+    const numberText = await runNumberOcr(numberFrame);
+    const numberOnlyCandidates = scoreOcrCandidates({ numberText });
+    if (numberOnlyCandidates[0]?.numberScore >= CLEAR_NUMBER_SCORE) {
+      consecutiveNumberMisses = 0;
+      handleOcrCandidates(numberOnlyCandidates, detection, numberText, {
+        ...options,
+        confirmImmediately: true
+      });
       return;
     }
 
-    const card = findCardByParsedNumber(parsed);
-    if (!card) {
-      if (nameTask) {
-        setStatus('ocr', '이름/번호 비교 중');
-        const nameResult = await nameTask;
-        if (nameResult?.card) {
-          consecutiveNumberMisses = 0;
-          const rawText = [text, nameResult.text].filter(Boolean).join('\n');
-          handleDetectedCard(nameResult.card, detection, rawText, { ...options, confirmImmediately: true });
-          return;
-        }
-      }
-      handleOcrFailure('missing', parsed.number, detection, text);
+    let nameText = '';
+    if (nameTask) {
+      setStatus('ocr', '이름/번호 비교 중');
+      const nameResult = await nameTask;
+      nameText = nameResult?.text || '';
+    }
+
+    const candidates = scoreOcrCandidates({ numberText, nameText });
+    if (candidates.length) {
+      consecutiveNumberMisses = 0;
+      const rawText = [numberText, nameText].filter(Boolean).join('\n');
+      handleOcrCandidates(candidates, detection, rawText, options);
       return;
     }
 
-    consecutiveNumberMisses = 0;
-    handleDetectedCard(card, detection, text, options);
+    const votedFallback = updateCandidateVotes([]);
+    if (votedFallback[0]?.score >= CANDIDATE_SCORE) {
+      renderCandidateCards(votedFallback, `반사/흔들림 보정 후보 · ${votedFallback[0].score}점`);
+      setStatus('candidate', `${votedFallback[0].card.number} 후보 유지`);
+      if (detection) drawDetectedOverlay(detection, 'candidate');
+      else drawGuideOcrOverlay('candidate');
+      lastOverlayState = 'candidate';
+      return;
+    }
+
+    consecutiveNumberMisses += 1;
+    const parsed = parseCardNumber(numberText, { strict: true });
+    handleOcrFailure(parsed ? 'missing' : 'failed', parsed ? parsed.number : '후보 없음', detection, numberText);
   } catch (err) {
     console.error(err);
     handleOcrFailure('failed', err.message || 'OCR 오류', detection, '');
@@ -1067,10 +1417,43 @@ function handleOcrFailure(statusKey, detail, detection, rawText) {
   console.log('OCR miss:', statusKey, detail, rawText);
   ocrCandidateId = null;
   ocrCandidateCount = 0;
+  hideCandidates();
   setStatus(statusKey, statusKey === 'missing' ? detail : '직접 검색');
   if (detection) drawDetectedOverlay(detection, statusKey);
   else drawGuideOcrOverlay(statusKey);
   lastOverlayState = statusKey;
+}
+
+function handleOcrCandidates(candidates, detection, rawText, options = {}) {
+  const voted = updateCandidateVotes(candidates);
+  const display = voted.length ? voted : candidates.slice(0, 3);
+  const top = display[0];
+  if (!top || (top.score < CANDIDATE_SCORE && top.nameScore < 18 && top.numberScore < 45)) {
+    handleOcrFailure('failed', '후보 없음', detection, rawText);
+    return;
+  }
+
+  const clearNumber = top.numberScore >= CLEAR_NUMBER_SCORE;
+  const stableVote = top.votes >= 2 && top.score >= 58;
+  const highConfidence = top.score >= DIRECT_SCORE || clearNumber || stableVote;
+
+  if (highConfidence) {
+    hideCandidates();
+    handleDetectedCard(top.card, detection, rawText, {
+      ...options,
+      confirmImmediately: options.confirmImmediately || clearNumber || stableVote
+    });
+    return;
+  }
+
+  ocrCandidateId = top.card.card_id;
+  ocrCandidateCount = Math.max(ocrCandidateCount, top.votes || 1);
+  renderCandidateCards(display, `이 카드일 가능성이 높음 · ${top.score}점`);
+  setStatus('candidate', `${top.card.number} 후보`);
+  if (detection) drawDetectedOverlay(detection, 'candidate');
+  else drawGuideOcrOverlay('candidate');
+  lastOverlayState = 'candidate';
+  console.log('OCR candidates:', display.map(item => `${item.card.card_id}:${item.score}`).join(', '), rawText);
 }
 
 function handleDetectedCard(card, detection, rawText, options = {}) {
@@ -1085,13 +1468,15 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
 
   if (ocrCandidateCount < requiredCount) {
     setStatus('stabilizing', `${card.number} 후보 확인 중`);
-    drawDetectedOverlay(detection, 'ready');
-    lastOverlayState = 'ready';
+    if (detection) drawDetectedOverlay(detection, 'candidate');
+    else drawGuideOcrOverlay('candidate');
+    lastOverlayState = 'candidate';
     console.log('OCR candidate:', card.card_id, rawText);
     return;
   }
 
   confirmCard(card, 'scan');
+  clearCandidateVotes();
   if (detection) drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   else drawGuideOcrOverlay(priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   lastOverlayState = priceHasValue(priceFor(card)) ? 'complete' : 'noPrice';
@@ -1153,6 +1538,7 @@ function resetScan() {
   currentCard = null;
   ocrCandidateId = null;
   ocrCandidateCount = 0;
+  clearCandidateVotes();
   lastOverlayState = 'seeking';
   renderEmpty('seeking');
   clearOverlay();
