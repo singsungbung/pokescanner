@@ -6,6 +6,7 @@ const ASSETS = [
   './app.js',
   './data/cards.js',
   './data/prices.js',
+  './data/visual-index.js',
   './assets/icon.svg',
   './manifest.webmanifest'
 ];

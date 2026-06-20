@@ -58,6 +58,7 @@ const els = {
 
 const cards = window.MONPRICE_CARDS || window.MEGA_SYMPHONIA_CARDS || [];
 const prices = window.MONPRICE_PRICES || window.MEGA_SYMPHONIA_PRICES || [];
+const visualIndex = window.MONPRICE_VISUAL_INDEX || [];
 const sets = window.MONPRICE_SETS || [{
   language: 'JP',
   set_code: 'M1S',
@@ -103,6 +104,9 @@ const VOTE_MAX_AGE_MS = 18000;
 const DIRECT_SCORE = 74;
 const CANDIDATE_SCORE = 38;
 const CLEAR_NUMBER_SCORE = 56;
+const VISUAL_DIRECT_SCORE = 62;
+const VISUAL_CANDIDATE_SCORE = 40;
+const VISUAL_OCR_LOCK_FLOOR = 28;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -262,7 +266,7 @@ function renderCandidateCards(candidates, detail = '') {
       </span>
       <span class="candidate-score">
         <strong>${item.score}</strong>
-        <small>번호 ${item.numberScore} · 이름 ${item.nameScore} · ${item.votes || 1}표</small>
+        <small>이미지 ${item.visualScore || 0} · 번호 ${item.numberScore} · 이름 ${item.nameScore} · ${item.votes || 1}표</small>
       </span>
     `;
     row.addEventListener('click', () => {
@@ -551,7 +555,7 @@ function scoreOcrCandidate(card, numberText = '', nameText = '') {
   const nameScore = scoreNameMatch(nameText, card);
   const setBonus = (numberScore > 0 || nameScore > 0) ? 10 : 0;
   const score = Math.min(100, numberScore + nameScore + setBonus);
-  return { card, score, numberScore, nameScore, setBonus, votes: 0 };
+  return { card, score, visualScore: 0, artworkScore: 0, layoutColorScore: 0, numberScore, nameScore, setBonus, votes: 0 };
 }
 
 function scoreOcrCandidates({ numberText = '', nameText = '' } = {}) {
@@ -566,6 +570,173 @@ function scoreOcrCandidates({ numberText = '', nameText = '' } = {}) {
     .slice(0, 6);
 }
 
+function hashCanvasRegion(sourceCanvas, rect, size = 8) {
+  if (!sourceCanvas) return '';
+  const sample = document.createElement('canvas');
+  sample.width = size;
+  sample.height = size;
+  const ctx = sample.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(
+    sourceCanvas,
+    rect.x, rect.y, rect.width, rect.height,
+    0, 0, size, size
+  );
+  const data = ctx.getImageData(0, 0, size, size).data;
+  const gray = [];
+  for (let i = 0; i < data.length; i += 4) {
+    gray.push(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+  }
+  const avg = gray.reduce((sum, value) => sum + value, 0) / Math.max(1, gray.length);
+  return gray.map(value => value >= avg ? '1' : '0').join('');
+}
+
+function colorGridFromCanvas(sourceCanvas, grid = 4) {
+  if (!sourceCanvas) return [];
+  const sample = document.createElement('canvas');
+  sample.width = grid;
+  sample.height = grid;
+  const ctx = sample.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(sourceCanvas, 0, 0, grid, grid);
+  const data = ctx.getImageData(0, 0, grid, grid).data;
+  const colors = [];
+  for (let i = 0; i < data.length; i += 4) {
+    colors.push(data[i], data[i + 1], data[i + 2]);
+  }
+  return colors;
+}
+
+function extractVisualFeature(cardCanvas) {
+  if (!cardCanvas || cardCanvas.width < 40 || cardCanvas.height < 60) return null;
+  const full = { x: 0, y: 0, width: cardCanvas.width, height: cardCanvas.height };
+  const art = {
+    x: Math.round(cardCanvas.width * 0.09),
+    y: Math.round(cardCanvas.height * 0.13),
+    width: Math.round(cardCanvas.width * 0.82),
+    height: Math.round(cardCanvas.height * 0.38)
+  };
+  return {
+    hash: hashCanvasRegion(cardCanvas, full, 8),
+    artHash: hashCanvasRegion(cardCanvas, art, 8),
+    color: colorGridFromCanvas(cardCanvas, 4)
+  };
+}
+
+function hashSimilarity(a, b) {
+  a = normalizeHashString(a);
+  b = normalizeHashString(b);
+  if (!a || !b || a.length !== b.length) return 0;
+  let same = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === b[i]) same += 1;
+  }
+  return same / a.length;
+}
+
+function normalizeHashString(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^[01]+$/.test(text)) return text;
+  if (/^[0-9a-f]+$/i.test(text)) {
+    return [...text].map(ch => Number.parseInt(ch, 16).toString(2).padStart(4, '0')).join('');
+  }
+  return text;
+}
+
+function colorSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || !a.length || a.length !== b.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const delta = Number(a[i]) - Number(b[i]);
+    sum += delta * delta;
+  }
+  const rms = Math.sqrt(sum / a.length);
+  return Math.max(0, 1 - rms / 255);
+}
+
+function scoreVisualFeature(feature, entry) {
+  if (!feature || !entry) return null;
+  const fullHash = entry.hash || entry.full_hash || entry.visual_hash;
+  const artHash = entry.artHash || entry.art_hash || entry.artwork_hash;
+  const colors = entry.color || entry.color_grid || entry.layout_color;
+  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 35);
+  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 25);
+  const colorScore = Math.round(colorSimilarity(feature.color, colors) * 10);
+  const visualScore = fullScore + artScore + colorScore;
+  return {
+    visualScore,
+    artworkScore: artScore,
+    layoutColorScore: colorScore
+  };
+}
+
+function scoreVisualCandidates(cardCanvas) {
+  if (!visualIndex.length || !cardCanvas) return [];
+  const feature = extractVisualFeature(cardCanvas);
+  if (!feature) return [];
+
+  return visualIndex
+    .map(entry => {
+      const card = cardById(entry.card_id);
+      if (!card || card.language !== selectedSet.language || card.set_code !== selectedSet.set_code) return null;
+      const visual = scoreVisualFeature(feature, entry);
+      if (!visual) return null;
+      const setBonus = visual.visualScore > 0 ? 10 : 0;
+      return {
+        card,
+        score: Math.min(100, visual.visualScore + setBonus),
+        visualScore: visual.visualScore,
+        artworkScore: visual.artworkScore,
+        layoutColorScore: visual.layoutColorScore,
+        numberScore: 0,
+        nameScore: 0,
+        setBonus,
+        votes: 0
+      };
+    })
+    .filter(Boolean)
+    .filter(item => item.visualScore >= VISUAL_CANDIDATE_SCORE)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
+}
+
+function mergeVisualAndOcrCandidates(visualCandidates, ocrCandidates) {
+  if (!visualCandidates.length) return ocrCandidates;
+  const byCard = new Map();
+  for (const item of [...visualCandidates, ...ocrCandidates]) {
+    const prev = byCard.get(item.card.card_id) || {
+      card: item.card,
+      visualScore: 0,
+      artworkScore: 0,
+      layoutColorScore: 0,
+      numberScore: 0,
+      nameScore: 0,
+      setBonus: 0,
+      votes: 0
+    };
+    prev.visualScore = Math.max(prev.visualScore, item.visualScore || 0);
+    prev.artworkScore = Math.max(prev.artworkScore, item.artworkScore || 0);
+    prev.layoutColorScore = Math.max(prev.layoutColorScore, item.layoutColorScore || 0);
+    prev.numberScore = Math.max(prev.numberScore, item.numberScore || 0);
+    prev.nameScore = Math.max(prev.nameScore, item.nameScore || 0);
+    prev.setBonus = Math.max(prev.setBonus, item.setBonus || 0);
+    byCard.set(item.card.card_id, prev);
+  }
+
+  return [...byCard.values()]
+    .map(item => ({
+      ...item,
+      score: Math.min(100, item.visualScore + Math.round(item.numberScore * 0.18) + Math.round(item.nameScore * 0.22) + item.setBonus)
+    }))
+    .filter(item => item.score >= CANDIDATE_SCORE || item.visualScore >= VISUAL_CANDIDATE_SCORE)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.visualScore - a.visualScore;
+    })
+    .slice(0, 6);
+}
+
 function updateCandidateVotes(candidates) {
   const now = Date.now();
   if (candidates?.length) {
@@ -574,6 +745,9 @@ function updateCandidateVotes(candidates) {
       candidates: candidates.slice(0, 3).map((item, index) => ({
         card_id: item.card.card_id,
         score: item.score,
+        visualScore: item.visualScore || 0,
+        artworkScore: item.artworkScore || 0,
+        layoutColorScore: item.layoutColorScore || 0,
         numberScore: item.numberScore,
         nameScore: item.nameScore,
         rank: index
@@ -595,6 +769,9 @@ function updateCandidateVotes(candidates) {
         card,
         scoreTotal: 0,
         weightedTotal: 0,
+        visualScore: 0,
+        artworkScore: 0,
+        layoutColorScore: 0,
         numberScore: 0,
         nameScore: 0,
         bestScore: 0,
@@ -602,6 +779,9 @@ function updateCandidateVotes(candidates) {
       };
       prev.scoreTotal += item.score;
       prev.weightedTotal += item.score * weight;
+      prev.visualScore = Math.max(prev.visualScore, item.visualScore || 0);
+      prev.artworkScore = Math.max(prev.artworkScore, item.artworkScore || 0);
+      prev.layoutColorScore = Math.max(prev.layoutColorScore, item.layoutColorScore || 0);
       prev.numberScore = Math.max(prev.numberScore, item.numberScore);
       prev.nameScore = Math.max(prev.nameScore, item.nameScore);
       prev.bestScore = Math.max(prev.bestScore, item.score);
@@ -617,6 +797,9 @@ function updateCandidateVotes(candidates) {
       return {
         card: item.card,
         score: Math.min(100, Math.round(Math.max(item.bestScore, average, item.weightedTotal / Math.max(1, item.votes)) + voteBonus)),
+        visualScore: item.visualScore,
+        artworkScore: item.artworkScore,
+        layoutColorScore: item.layoutColorScore,
         numberScore: item.numberScore,
         nameScore: item.nameScore,
         setBonus: 10,
@@ -1308,6 +1491,7 @@ function preparePhotoCardCanvas(img) {
 function preparePhotoOcrRegions(img) {
   const cardCanvas = preparePhotoCardCanvas(img);
   return {
+    cardFrame: cardCanvas,
     numberFrame: cropNumberStrip(cardCanvas),
     nameFrame: cropNameStrip(cardCanvas)
   };
@@ -1323,6 +1507,7 @@ function captureOcrRegions(detection) {
   const guideCardCanvas = captureCardCanvasFromGuide();
   if (guideCardCanvas) {
     return {
+      cardFrame: guideCardCanvas,
       numberFrame: cropNumberStrip(guideCardCanvas),
       nameFrame: cropNameStrip(guideCardCanvas)
     };
@@ -1330,6 +1515,7 @@ function captureOcrRegions(detection) {
 
   const numberFrame = captureNumberFromQuad(detection?.points) || captureNumberFromRect(detection?.rect);
   return {
+    cardFrame: null,
     numberFrame,
     nameFrame: null
   };
@@ -1337,11 +1523,17 @@ function captureOcrRegions(detection) {
 
 async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', detection = null, options = {}) {
   if (isOcrBusy) return;
-  const numberFrame = regions?.numberFrame || regions;
-  const nameFrame = regions?.nameFrame || null;
+  const hasRegionObject = regions && (
+    Object.prototype.hasOwnProperty.call(regions, 'cardFrame') ||
+    Object.prototype.hasOwnProperty.call(regions, 'numberFrame') ||
+    Object.prototype.hasOwnProperty.call(regions, 'nameFrame')
+  );
+  const cardFrame = hasRegionObject ? regions.cardFrame || null : null;
+  const numberFrame = hasRegionObject ? regions.numberFrame || null : regions;
+  const nameFrame = hasRegionObject ? regions.nameFrame || null : null;
 
-  if (!numberFrame) {
-    setStatus('failed', '번호 영역을 자르지 못함');
+  if (!numberFrame && !cardFrame) {
+    setStatus('failed', '카드 영역을 자르지 못함');
     if (detection) drawDetectedOverlay(detection, 'failed');
     else drawGuideOcrOverlay('failed');
     lastOverlayState = 'failed';
@@ -1356,13 +1548,43 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     else drawGuideOcrOverlay('ocr');
     lastOverlayState = 'ocr';
 
+    const visualCandidates = scoreVisualCandidates(cardFrame);
+    const visualOptions = {
+      ...options,
+      visualIndexActive: Boolean(visualIndex.length && cardFrame)
+    };
+
+    if (visualCandidates[0]?.visualScore >= VISUAL_DIRECT_SCORE) {
+      consecutiveNumberMisses = 0;
+      handleOcrCandidates(visualCandidates, detection, 'visual match', {
+        ...visualOptions,
+        confirmImmediately: true
+      });
+      return;
+    }
+
+    if (visualCandidates[0]?.score >= VISUAL_CANDIDATE_SCORE) {
+      renderCandidateCards(visualCandidates, `이미지 기반 후보 · ${visualCandidates[0].score}점`);
+      setStatus('candidate', `${visualCandidates[0].card.number} visual 후보`);
+      if (detection) drawDetectedOverlay(detection, 'candidate');
+      else drawGuideOcrOverlay('candidate');
+      lastOverlayState = 'candidate';
+    }
+
+    if (!numberFrame) {
+      if (visualCandidates.length) return;
+      handleOcrFailure('failed', 'visual 후보 없음', detection, '');
+      return;
+    }
+
     const nameTask = startNameMatchOcr(nameFrame);
     const numberText = await runNumberOcr(numberFrame);
-    const numberOnlyCandidates = scoreOcrCandidates({ numberText });
-    if (numberOnlyCandidates[0]?.numberScore >= CLEAR_NUMBER_SCORE) {
+    const numberOnlyCandidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText }));
+    const numberTop = numberOnlyCandidates[0];
+    if (numberTop?.numberScore >= CLEAR_NUMBER_SCORE && (!visualOptions.visualIndexActive || numberTop.visualScore >= VISUAL_OCR_LOCK_FLOOR)) {
       consecutiveNumberMisses = 0;
       handleOcrCandidates(numberOnlyCandidates, detection, numberText, {
-        ...options,
+        ...visualOptions,
         confirmImmediately: true
       });
       return;
@@ -1375,11 +1597,11 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
       nameText = nameResult?.text || '';
     }
 
-    const candidates = scoreOcrCandidates({ numberText, nameText });
+    const candidates = mergeVisualAndOcrCandidates(visualCandidates, scoreOcrCandidates({ numberText, nameText }));
     if (candidates.length) {
       consecutiveNumberMisses = 0;
       const rawText = [numberText, nameText].filter(Boolean).join('\n');
-      handleOcrCandidates(candidates, detection, rawText, options);
+      handleOcrCandidates(candidates, detection, rawText, visualOptions);
       return;
     }
 
@@ -1428,14 +1650,16 @@ function handleOcrCandidates(candidates, detection, rawText, options = {}) {
   const voted = updateCandidateVotes(candidates);
   const display = voted.length ? voted : candidates.slice(0, 3);
   const top = display[0];
-  if (!top || (top.score < CANDIDATE_SCORE && top.nameScore < 18 && top.numberScore < 45)) {
+  if (!top || (top.score < CANDIDATE_SCORE && top.nameScore < 18 && top.numberScore < 45 && top.visualScore < VISUAL_CANDIDATE_SCORE)) {
     handleOcrFailure('failed', '후보 없음', detection, rawText);
     return;
   }
 
   const clearNumber = top.numberScore >= CLEAR_NUMBER_SCORE;
+  const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE;
   const stableVote = top.votes >= 2 && top.score >= 58;
-  const highConfidence = top.score >= DIRECT_SCORE || clearNumber || stableVote;
+  const visualGate = options.visualIndexActive && top.visualScore < VISUAL_OCR_LOCK_FLOOR && !clearVisual;
+  const highConfidence = !visualGate && (top.score >= DIRECT_SCORE || clearNumber || clearVisual || stableVote);
 
   if (highConfidence) {
     hideCandidates();
