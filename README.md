@@ -1,4 +1,4 @@
-# MonPrice M1S Scanner
+# pokeScanner
 
 개인용 일판 포켓몬 카드 가격 스캐너 웹앱입니다. 현재는 `JP / M1S / 메가심포니아` 세트를 대상으로 하는 정적 HTML/CSS/JS 앱입니다.
 
