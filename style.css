@@ -221,10 +221,15 @@ video {
 .guide-frame.is-tracking {
   animation: none;
   transition: left .09s linear, top .09s linear, width .09s linear, height .09s linear, box-shadow .18s ease;
+  box-shadow: none;
 }
 
 .guide-frame.is-tracking .guide-copy {
   bottom: -34px;
+}
+
+.guide-frame.is-tracking .corner {
+  opacity: 0;
 }
 
 .guide-frame.state-ocr,

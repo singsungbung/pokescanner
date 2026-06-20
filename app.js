@@ -115,9 +115,13 @@ const VISUAL_OCR_LOCK_FLOOR = 22;
 const VISUAL_MARGIN_LOCK = 3;
 const LOCK_HOLD_MS = 900;
 const LOCK_RECHECK_MS = 360;
-const LOCK_SWITCH_SCORE = 52;
+const LOCK_SWITCH_SCORE = 48;
+const LOCK_FORCE_SWITCH_SCORE = 62;
+const LOCK_RESCAN_SCORE = 42;
+const LOCK_SWITCH_MARGIN = 4;
 const LOCK_SWITCH_VOTES = 2;
 const LOCK_LOST_MS = 1100;
+const TRACKED_CARD_SHRINK = 0.92;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -132,6 +136,7 @@ let detectionLoopActive = false;
 let lastDetectionTick = 0;
 let lastFastVisualTick = 0;
 let lastDetection = null;
+let smoothedDetection = null;
 let stableFrames = 0;
 let stableSince = 0;
 let latestDetection = null;
@@ -145,6 +150,7 @@ let lockSwitchCardId = null;
 let lockSwitchCount = 0;
 let lastLockCheckTick = 0;
 let lastLockSeenAt = 0;
+let lockMissCount = 0;
 let consecutiveNumberMisses = 0;
 let ocrVotes = [];
 const scanThumbByCardId = new Map();
@@ -711,9 +717,9 @@ function scoreVisualFeature(feature, entry) {
   const fullHash = entry.hash || entry.full_hash || entry.visual_hash;
   const artHash = entry.artHash || entry.art_hash || entry.artwork_hash;
   const colors = entry.color || entry.color_grid || entry.layout_color;
-  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 25);
-  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 35);
-  const colorScore = Math.round(colorSimilarity(feature.color, colors) * 10);
+  const fullScore = Math.round(hashSimilarity(feature.hash, fullHash) * 18);
+  const artScore = Math.round(hashSimilarity(feature.artHash, artHash) * 42);
+  const colorScore = Math.round(colorSimilarity(feature.color, colors) * 8);
   const visualScore = fullScore + artScore + colorScore;
   return {
     visualScore,
@@ -816,6 +822,7 @@ function lockScan(card) {
   lastLockCheckTick = 0;
   lockSwitchCardId = null;
   lockSwitchCount = 0;
+  lockMissCount = 0;
 }
 
 function releaseScanLock() {
@@ -825,6 +832,7 @@ function releaseScanLock() {
   lastLockCheckTick = 0;
   lockSwitchCardId = null;
   lockSwitchCount = 0;
+  lockMissCount = 0;
 }
 
 function reviewLockedCard(detection, now) {
@@ -856,19 +864,30 @@ function reviewLockedCard(detection, now) {
   }
 
   const sameCandidate = candidates.find(item => item.card.card_id === lockedCardId);
-  if (sameCandidate && sameCandidate.visualScore >= VISUAL_PREVIEW_SCORE) {
+  const sameIsPlausible =
+    sameCandidate &&
+    sameCandidate.visualScore >= Math.max(20, VISUAL_PREVIEW_SCORE - 4) &&
+    (!top || top.card.card_id === lockedCardId || (top.visualScore - sameCandidate.visualScore) < 9);
+
+  if (sameIsPlausible) {
     lastLockSeenAt = now;
     lockSwitchCardId = null;
     lockSwitchCount = 0;
+    lockMissCount = 0;
     setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
     lastOverlayState = priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice';
     return true;
   }
 
+  const margin = visualMargin(candidates);
+  const differentTop = top.card.card_id !== lockedCardId;
+  const currentLooksWrong = differentTop && (!sameCandidate || top.visualScore - sameCandidate.visualScore >= 9);
   const canSwitch =
-    top.card.card_id !== lockedCardId &&
+    differentTop &&
+    currentLooksWrong &&
     top.visualScore >= LOCK_SWITCH_SCORE &&
-    now - lockedAt >= LOCK_HOLD_MS;
+    now - lockedAt >= LOCK_HOLD_MS &&
+    (margin >= LOCK_SWITCH_MARGIN || top.visualScore >= LOCK_FORCE_SWITCH_SCORE);
 
   if (canSwitch) {
     if (lockSwitchCardId === top.card.card_id) lockSwitchCount += 1;
@@ -877,16 +896,31 @@ function reviewLockedCard(detection, now) {
       lockSwitchCount = 1;
     }
 
-    setStatus('candidate', `${top.card.number} 새 카드 검토 ${lockSwitchCount}/${LOCK_SWITCH_VOTES}`);
+    const requiredVotes = top.visualScore >= LOCK_FORCE_SWITCH_SCORE ? 1 : LOCK_SWITCH_VOTES;
+    setStatus('candidate', `${top.card.number} 새 카드 검토 ${lockSwitchCount}/${requiredVotes}`);
     drawDetectedOverlay(detection, 'candidate');
     lastOverlayState = 'candidate';
 
-    if (lockSwitchCount >= LOCK_SWITCH_VOTES) {
+    if (lockSwitchCount >= requiredVotes) {
       rememberScanThumbnail(top.card, cardFrame);
       confirmCard(top.card, 'scan');
       lockScan(top.card);
       drawDetectedOverlay(detection, priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice');
       lastOverlayState = priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice';
+    }
+    return true;
+  }
+
+  if (differentTop && currentLooksWrong && top.visualScore >= LOCK_RESCAN_SCORE && now - lockedAt >= LOCK_HOLD_MS) {
+    lockMissCount += 1;
+    setStatus('ready', `현재 카드 불확실 · 재스캔 준비 ${lockMissCount}/2`);
+    drawDetectedOverlay(detection, 'ready');
+    lastOverlayState = 'ready';
+    if (lockMissCount >= 2) {
+      releaseScanLock();
+      clearCandidateVotes();
+      ocrCooldownUntil = 0;
+      setStatus('ready', '새 카드 재스캔');
     }
     return true;
   }
@@ -1247,6 +1281,132 @@ function orderQuadPoints(points) {
   return [tl, tr, br, bl];
 }
 
+function distanceBetween(a, b) {
+  return Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
+}
+
+function normalizeVector(vector, fallback = { x: 1, y: 0 }) {
+  const len = Math.hypot(vector.x, vector.y);
+  if (!len) return fallback;
+  return { x: vector.x / len, y: vector.y / len };
+}
+
+function pointsFromRect(rect) {
+  if (!rect) return null;
+  return [
+    { x: rect.x, y: rect.y },
+    { x: rect.x + rect.width, y: rect.y },
+    { x: rect.x + rect.width, y: rect.y + rect.height },
+    { x: rect.x, y: rect.y + rect.height }
+  ];
+}
+
+function rectFromPoints(points) {
+  if (!points?.length) return null;
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return {
+    x: Math.round(minX),
+    y: Math.round(minY),
+    width: Math.round(maxX - minX),
+    height: Math.round(maxY - minY)
+  };
+}
+
+function fitCardAspectPoints(points, shrink = TRACKED_CARD_SHRINK) {
+  const ordered = orderQuadPoints(points);
+  if (!ordered) return null;
+  const [tl, tr, br, bl] = ordered;
+  const center = {
+    x: (tl.x + tr.x + br.x + bl.x) / 4,
+    y: (tl.y + tr.y + br.y + bl.y) / 4
+  };
+  const width = Math.max(1, (distanceBetween(tl, tr) + distanceBetween(bl, br)) / 2);
+  const height = Math.max(1, (distanceBetween(tl, bl) + distanceBetween(tr, br)) / 2);
+  let targetWidth = width;
+  let targetHeight = height;
+  const ratio = width / height;
+
+  if (ratio > CARD_ASPECT_RATIO) targetWidth = height * CARD_ASPECT_RATIO;
+  else targetHeight = width / CARD_ASPECT_RATIO;
+
+  targetWidth *= shrink;
+  targetHeight *= shrink;
+
+  const xAxis = normalizeVector({
+    x: (tr.x - tl.x + br.x - bl.x) / 2,
+    y: (tr.y - tl.y + br.y - bl.y) / 2
+  });
+  const yAxis = normalizeVector({
+    x: (bl.x - tl.x + br.x - tr.x) / 2,
+    y: (bl.y - tl.y + br.y - tr.y) / 2
+  }, { x: -xAxis.y, y: xAxis.x });
+
+  const halfW = targetWidth / 2;
+  const halfH = targetHeight / 2;
+  return [
+    {
+      x: Math.round(center.x - xAxis.x * halfW - yAxis.x * halfH),
+      y: Math.round(center.y - xAxis.y * halfW - yAxis.y * halfH)
+    },
+    {
+      x: Math.round(center.x + xAxis.x * halfW - yAxis.x * halfH),
+      y: Math.round(center.y + xAxis.y * halfW - yAxis.y * halfH)
+    },
+    {
+      x: Math.round(center.x + xAxis.x * halfW + yAxis.x * halfH),
+      y: Math.round(center.y + xAxis.y * halfW + yAxis.y * halfH)
+    },
+    {
+      x: Math.round(center.x - xAxis.x * halfW + yAxis.x * halfH),
+      y: Math.round(center.y - xAxis.y * halfW + yAxis.y * halfH)
+    }
+  ];
+}
+
+function clampPointToFrame(point, width, height) {
+  return {
+    x: Math.max(0, Math.min(width - 1, Math.round(point.x))),
+    y: Math.max(0, Math.min(height - 1, Math.round(point.y)))
+  };
+}
+
+function prepareDetectedCard(candidate, frameWidth, frameHeight) {
+  if (!candidate?.rect) return null;
+  const rawPoints = candidate.points?.length === 4 ? candidate.points : pointsFromRect(candidate.rect);
+  const fittedPoints = fitCardAspectPoints(rawPoints) || rawPoints;
+  const points = fittedPoints.map(point => clampPointToFrame(point, frameWidth, frameHeight));
+  const rect = rectFromPoints(points);
+  if (!rect || rect.width < 20 || rect.height < 30) return null;
+  return {
+    ...candidate,
+    rawRect: candidate.rect,
+    rawPoints,
+    rect,
+    points
+  };
+}
+
+function blendDetection(current, previous, alpha = 0.42) {
+  if (!current || !previous || !detectionSimilarity(current, previous, 0.12, 0.22, 0.22)) return current;
+  const blendPoint = (a, b) => ({
+    x: Math.round(b.x + (a.x - b.x) * alpha),
+    y: Math.round(b.y + (a.y - b.y) * alpha)
+  });
+  const points = current.points?.length === 4 && previous.points?.length === 4
+    ? current.points.map((point, index) => blendPoint(point, previous.points[index]))
+    : current.points;
+  return {
+    ...current,
+    points,
+    rect: rectFromPoints(points) || current.rect
+  };
+}
+
 function drawDetectedOverlay(detection, state = 'seeking') {
   resizeOverlay();
   const ctx = els.detectCanvas.getContext('2d');
@@ -1257,10 +1417,10 @@ function drawDetectedOverlay(detection, state = 'seeking') {
   setGuideColor(color, state);
   syncGuideFrameToDetection(detection);
   ctx.save();
-  ctx.lineWidth = 6;
-  ctx.strokeStyle = color;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   ctx.shadowColor = color;
-  ctx.shadowBlur = 16;
+  ctx.shadowBlur = 14;
   ctx.beginPath();
 
   const points = orderQuadPoints(detection.points);
@@ -1273,6 +1433,11 @@ function drawDetectedOverlay(detection, state = 'seeking') {
     ctx.rect(rect.x, rect.y, rect.width, rect.height);
   }
 
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = 'rgba(0,0,0,.42)';
+  ctx.stroke();
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = color;
   ctx.stroke();
   ctx.restore();
 
@@ -1379,9 +1544,16 @@ function detectCardRect() {
       approx.delete();
       cnt.delete();
     }
-    return best;
+    const prepared = prepareDetectedCard(best, canvas.width, canvas.height);
+    if (!prepared) {
+      smoothedDetection = null;
+      return null;
+    }
+    smoothedDetection = blendDetection(prepared, smoothedDetection, 0.58);
+    return smoothedDetection;
   } catch (err) {
     console.warn('OpenCV detection failed:', err);
+    smoothedDetection = null;
     return null;
   } finally {
     [src, gray, blur, edges, closed, dilated, hierarchy, kernel].forEach(mat => {
@@ -1391,7 +1563,7 @@ function detectCardRect() {
   }
 }
 
-function detectionSimilarity(a, b) {
+function detectionSimilarity(a, b, maxCenter = 0.055, maxWidth = 0.12, maxHeight = 0.12) {
   if (!a?.rect || !b?.rect) return false;
   const ar = a.rect;
   const br = b.rect;
@@ -1403,7 +1575,7 @@ function detectionSimilarity(a, b) {
   const centerDelta = Math.hypot(acx - bcx, acy - bcy) / diagonal;
   const widthDelta = Math.abs(ar.width - br.width) / Math.max(ar.width, br.width);
   const heightDelta = Math.abs(ar.height - br.height) / Math.max(ar.height, br.height);
-  return centerDelta < 0.055 && widthDelta < 0.12 && heightDelta < 0.12;
+  return centerDelta < maxCenter && widthDelta < maxWidth && heightDelta < maxHeight;
 }
 
 function centeredCardRect(width, height, widthRatio = 0.68, heightRatio = 0.86) {
@@ -1508,6 +1680,7 @@ function processDetectionTick() {
     latestDetection = null;
     stableFrames = 0;
     stableSince = 0;
+    smoothedDetection = null;
 
     if (isScanLocked()) {
       if (now - lastLockSeenAt > LOCK_LOST_MS) {
@@ -2101,6 +2274,7 @@ function stopCamera() {
   clearOverlay();
   latestDetection = null;
   lastDetection = null;
+  smoothedDetection = null;
   releaseScanLock();
   stableFrames = 0;
   stableSince = 0;
@@ -2115,6 +2289,7 @@ function resetScan() {
   releaseScanLock();
   clearCandidateVotes();
   lastOverlayState = 'seeking';
+  smoothedDetection = null;
   renderEmpty('seeking');
   clearOverlay();
   ocrCooldownUntil = 0;
