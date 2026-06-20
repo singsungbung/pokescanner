@@ -96,7 +96,7 @@ const OVERLAY_COLORS = {
 };
 
 const DETECT_EVERY_MS = 120;
-const FAST_VISUAL_EVERY_MS = 280;
+const FAST_VISUAL_EVERY_MS = 420;
 const STABLE_FRAME_COUNT = 2;
 const STABLE_MS = 260;
 const OCR_COOLDOWN_MS = 900;
@@ -113,15 +113,16 @@ const VISUAL_CANDIDATE_SCORE = 32;
 const VISUAL_PREVIEW_SCORE = 26;
 const VISUAL_OCR_LOCK_FLOOR = 22;
 const VISUAL_MARGIN_LOCK = 3;
-const LOCK_HOLD_MS = 900;
-const LOCK_RECHECK_MS = 360;
-const LOCK_SWITCH_SCORE = 48;
-const LOCK_FORCE_SWITCH_SCORE = 62;
-const LOCK_RESCAN_SCORE = 42;
-const LOCK_SWITCH_MARGIN = 4;
-const LOCK_SWITCH_VOTES = 2;
-const LOCK_LOST_MS = 1100;
-const TRACKED_CARD_SHRINK = 0.92;
+const LOCK_HOLD_MS = 1200;
+const LOCK_RECHECK_MS = 520;
+const LOCK_SWITCH_SCORE = 52;
+const LOCK_FORCE_SWITCH_SCORE = 66;
+const LOCK_RESCAN_SCORE = 46;
+const LOCK_SWITCH_MARGIN = 6;
+const LOCK_SWITCH_VOTES = 3;
+const LOCK_RESCAN_VOTES = 3;
+const LOCK_LOST_MS = 1300;
+const TRACKED_CARD_SHRINK = 0.94;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -792,7 +793,7 @@ function updateDebugView(cardCanvas, candidates = [], label = '') {
   `).join('');
 }
 
-function previewVisualCandidates(detection = null, label = '실시간 이미지 후보') {
+function previewVisualCandidates(detection = null, label = '실시간 이미지 후보', options = {}) {
   if (!visualIndex.length || isOcrBusy) return false;
   const cardFrame = captureCardFromDetection(detection) || captureCardCanvasFromGuide();
   if (!cardFrame) return false;
@@ -800,10 +801,12 @@ function previewVisualCandidates(detection = null, label = '실시간 이미지 
   const candidates = scoreVisualCandidates(cardFrame, VISUAL_PREVIEW_SCORE);
   updateDebugView(cardFrame, candidates, candidates.length ? label : 'visual 후보 없음');
   if (!candidates.length) return false;
+  if (options.quiet) return true;
 
   handleOcrCandidates(candidates, detection, 'visual preview', {
     visualIndexActive: true,
-    confirmImmediately: isClearVisualCandidate(candidates),
+    allowConfirm: options.allowConfirm !== false,
+    confirmImmediately: options.allowConfirm !== false && isClearVisualCandidate(candidates),
     cardFrame
   });
   return true;
@@ -913,10 +916,10 @@ function reviewLockedCard(detection, now) {
 
   if (differentTop && currentLooksWrong && top.visualScore >= LOCK_RESCAN_SCORE && now - lockedAt >= LOCK_HOLD_MS) {
     lockMissCount += 1;
-    setStatus('ready', `현재 카드 불확실 · 재스캔 준비 ${lockMissCount}/2`);
+    setStatus('ready', `현재 카드 불확실 · 재스캔 준비 ${lockMissCount}/${LOCK_RESCAN_VOTES}`);
     drawDetectedOverlay(detection, 'ready');
     lastOverlayState = 'ready';
-    if (lockMissCount >= 2) {
+    if (lockMissCount >= LOCK_RESCAN_VOTES) {
       releaseScanLock();
       clearCandidateVotes();
       ocrCooldownUntil = 0;
@@ -1529,7 +1532,22 @@ function detectCardRect() {
       const centerBias = 1 - Math.abs((rect.x + rect.width / 2) - canvas.width / 2) / (canvas.width / 2);
       const ratioScore = 1 - Math.min(1, Math.abs(ratio - 0.715) / 0.35);
       const sizeScore = 1 - Math.min(1, Math.abs((area / frameArea) - 0.18) / 0.28);
-      const score = area * (0.55 + Math.max(0, centerBias) * 0.24 + ratioScore * 0.5 + sizeScore * 0.16);
+      let score = area * (0.55 + Math.max(0, centerBias) * 0.24 + ratioScore * 0.5 + sizeScore * 0.16);
+      if (smoothedDetection?.rect) {
+        const prev = smoothedDetection.rect;
+        const prevCx = prev.x + prev.width / 2;
+        const prevCy = prev.y + prev.height / 2;
+        const cx = rect.x + rect.width / 2;
+        const cy = rect.y + rect.height / 2;
+        const prevDiagonal = Math.hypot(prev.width, prev.height) || 1;
+        const centerDelta = Math.hypot(cx - prevCx, cy - prevCy) / prevDiagonal;
+        const shapeDelta = (
+          Math.abs(rect.width - prev.width) / Math.max(rect.width, prev.width) +
+          Math.abs(rect.height - prev.height) / Math.max(rect.height, prev.height)
+        ) / 2;
+        const continuity = Math.max(0, 1 - centerDelta / 0.24) * Math.max(0, 1 - shapeDelta / 0.34);
+        score *= 1 + continuity * 0.46;
+      }
 
       if (approx.rows >= 4 && approx.rows <= 12 && ratio > 0.38 && ratio < 0.9) {
         let points = rotatedRectPoints(rotated) || [];
@@ -1549,7 +1567,7 @@ function detectCardRect() {
       smoothedDetection = null;
       return null;
     }
-    smoothedDetection = blendDetection(prepared, smoothedDetection, 0.58);
+    smoothedDetection = blendDetection(prepared, smoothedDetection, 0.38);
     return smoothedDetection;
   } catch (err) {
     console.warn('OpenCV detection failed:', err);
@@ -1675,6 +1693,7 @@ function processDetectionTick() {
   const now = Date.now();
   const detected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
   const canPreviewVisual = !isOcrBusy && now - lastFastVisualTick >= FAST_VISUAL_EVERY_MS;
+  const trackingAvailable = USE_BOX_TRACKING && cvReady;
 
   if (!detected) {
     latestDetection = null;
@@ -1704,9 +1723,14 @@ function processDetectionTick() {
       setStatus(idleState, detail);
       lastOverlayState = idleState;
     }
+
+    if (trackingAvailable) {
+      return;
+    }
+
     if (!currentCard && canPreviewVisual) {
       lastFastVisualTick = now;
-      previewVisualCandidates(null, '가이드 이미지 후보');
+      previewVisualCandidates(null, '가이드 이미지 후보', { allowConfirm: false });
     }
     if (!currentCard && !isOcrBusy && now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1738,11 +1762,7 @@ function processDetectionTick() {
     lastOverlayState = trackingState;
     if (canPreviewVisual) {
       lastFastVisualTick = now;
-      previewVisualCandidates(detected, '외곽선 이미지 후보');
-    }
-    if (now >= ocrCooldownUntil) {
-      ocrCooldownUntil = now + OCR_COOLDOWN_MS;
-      ocrImageFromDetection(detected);
+      previewVisualCandidates(detected, '외곽선 이미지 후보', { allowConfirm: false, quiet: true });
     }
     return;
   }
@@ -1759,7 +1779,7 @@ function processDetectionTick() {
   els.detectStatus.textContent = 'GUIDE OCR';
   if (canPreviewVisual) {
     lastFastVisualTick = now;
-    previewVisualCandidates(detected, '안정화 이미지 후보');
+    previewVisualCandidates(detected, '안정화 이미지 후보', { allowConfirm: true });
   }
 
   if (now >= ocrCooldownUntil) {
@@ -2178,7 +2198,8 @@ function handleOcrCandidates(candidates, detection, rawText, options = {}) {
   const clearVisual = top.visualScore >= VISUAL_DIRECT_SCORE && visualMargin(display) >= VISUAL_MARGIN_LOCK;
   const stableVote = top.votes >= 2 && top.score >= 58;
   const visualGate = options.visualIndexActive && top.visualScore < VISUAL_OCR_LOCK_FLOOR && !clearVisual;
-  const highConfidence = !visualGate && (top.score >= DIRECT_SCORE || clearNumber || clearVisual || stableVote);
+  const canConfirm = options.allowConfirm !== false;
+  const highConfidence = canConfirm && !visualGate && (top.score >= DIRECT_SCORE || clearNumber || clearVisual || stableVote);
 
   if (highConfidence) {
     hideCandidates();
