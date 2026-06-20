@@ -149,6 +149,7 @@ video {
   inset: 0;
   width: 100%;
   height: 100%;
+  object-fit: cover;
   pointer-events: none;
   z-index: 3;
 }
@@ -217,6 +218,15 @@ video {
   animation: guide-search 1.2s ease-in-out infinite;
 }
 
+.guide-frame.is-tracking {
+  animation: none;
+  transition: left .09s linear, top .09s linear, width .09s linear, height .09s linear, box-shadow .18s ease;
+}
+
+.guide-frame.is-tracking .guide-copy {
+  bottom: -34px;
+}
+
 .guide-frame.state-ocr,
 .guide-frame.state-candidate,
 .guide-frame.state-stabilizing {
@@ -233,6 +243,19 @@ video {
 .guide-frame.state-complete .corner,
 .guide-frame.state-noPrice .corner {
   filter: drop-shadow(0 0 8px var(--complete));
+}
+
+.guide-frame.is-tracking,
+.guide-frame.is-tracking.state-ready,
+.guide-frame.is-tracking.state-seeking,
+.guide-frame.is-tracking.state-failed,
+.guide-frame.is-tracking.state-missing,
+.guide-frame.is-tracking.state-ocr,
+.guide-frame.is-tracking.state-candidate,
+.guide-frame.is-tracking.state-stabilizing,
+.guide-frame.is-tracking.state-complete,
+.guide-frame.is-tracking.state-noPrice {
+  animation: none;
 }
 
 @keyframes guide-search {

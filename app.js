@@ -95,22 +95,24 @@ const OVERLAY_COLORS = {
   noPrice: '#4aa3ff'
 };
 
-const DETECT_EVERY_MS = 420;
-const STABLE_FRAME_COUNT = 3;
-const STABLE_MS = 550;
-const OCR_COOLDOWN_MS = 1700;
+const DETECT_EVERY_MS = 180;
+const FAST_VISUAL_EVERY_MS = 620;
+const STABLE_FRAME_COUNT = 2;
+const STABLE_MS = 260;
+const OCR_COOLDOWN_MS = 1250;
 const RECENT_DEDUPE_MS = 30000;
-const USE_BOX_TRACKING = false;
+const USE_BOX_TRACKING = true;
 const CARD_ASPECT_RATIO = 63 / 88;
 const VOTE_WINDOW = 10;
 const VOTE_MAX_AGE_MS = 18000;
-const DIRECT_SCORE = 74;
-const CANDIDATE_SCORE = 38;
-const CLEAR_NUMBER_SCORE = 56;
-const VISUAL_DIRECT_SCORE = 62;
-const VISUAL_CANDIDATE_SCORE = 40;
-const VISUAL_OCR_LOCK_FLOOR = 28;
-const VISUAL_MARGIN_LOCK = 6;
+const DIRECT_SCORE = 68;
+const CANDIDATE_SCORE = 32;
+const CLEAR_NUMBER_SCORE = 52;
+const VISUAL_DIRECT_SCORE = 56;
+const VISUAL_CANDIDATE_SCORE = 32;
+const VISUAL_PREVIEW_SCORE = 26;
+const VISUAL_OCR_LOCK_FLOOR = 22;
+const VISUAL_MARGIN_LOCK = 3;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -123,6 +125,7 @@ let nameOcrWorkerPromise = null;
 let detectionLoopId = null;
 let detectionLoopActive = false;
 let lastDetectionTick = 0;
+let lastFastVisualTick = 0;
 let lastDetection = null;
 let stableFrames = 0;
 let stableSince = 0;
@@ -675,7 +678,7 @@ function scoreVisualFeature(feature, entry) {
   };
 }
 
-function scoreVisualCandidates(cardCanvas) {
+function scoreVisualCandidates(cardCanvas, minScore = VISUAL_CANDIDATE_SCORE) {
   if (!visualIndex.length || !cardCanvas) return [];
   const feature = extractVisualFeature(cardCanvas);
   if (!feature) return [];
@@ -700,7 +703,7 @@ function scoreVisualCandidates(cardCanvas) {
       };
     })
     .filter(Boolean)
-    .filter(item => item.visualScore >= VISUAL_CANDIDATE_SCORE)
+    .filter(item => item.visualScore >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, 6);
 }
@@ -737,6 +740,22 @@ function updateDebugView(cardCanvas, candidates = [], label = '') {
       <small>번호 ${item.numberScore || 0} · 이름 ${item.nameScore || 0} · margin ${index === 0 ? visualMargin(candidates) : '-'}</small>
     </div>
   `).join('');
+}
+
+function previewVisualCandidates(detection = null, label = '실시간 이미지 후보') {
+  if (!visualIndex.length || isOcrBusy) return false;
+  const cardFrame = captureCardFromDetection(detection) || captureCardCanvasFromGuide();
+  if (!cardFrame) return false;
+
+  const candidates = scoreVisualCandidates(cardFrame, VISUAL_PREVIEW_SCORE);
+  updateDebugView(cardFrame, candidates, candidates.length ? label : 'visual 후보 없음');
+  if (!candidates.length) return false;
+
+  handleOcrCandidates(candidates, detection, 'visual preview', {
+    visualIndexActive: true,
+    confirmImmediately: isClearVisualCandidate(candidates)
+  });
+  return true;
 }
 
 function mergeVisualAndOcrCandidates(visualCandidates, ocrCandidates) {
@@ -1036,6 +1055,49 @@ function resizeOverlay() {
 function clearOverlay() {
   const ctx = els.detectCanvas.getContext('2d');
   ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
+  resetGuideFramePosition();
+}
+
+function videoRectToDisplayRect(rect) {
+  if (!rect || !els.detectCanvas || !els.video.videoWidth || !els.video.videoHeight) return null;
+  const boxW = els.detectCanvas.clientWidth || els.detectCanvas.getBoundingClientRect().width;
+  const boxH = els.detectCanvas.clientHeight || els.detectCanvas.getBoundingClientRect().height;
+  if (!boxW || !boxH) return null;
+
+  const scale = Math.max(boxW / els.video.videoWidth, boxH / els.video.videoHeight);
+  const offsetX = (boxW - els.video.videoWidth * scale) / 2;
+  const offsetY = (boxH - els.video.videoHeight * scale) / 2;
+  return {
+    x: offsetX + rect.x * scale,
+    y: offsetY + rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale
+  };
+}
+
+function resetGuideFramePosition() {
+  if (!els.guideFrame) return;
+  els.guideFrame.classList.remove('is-tracking');
+  els.guideFrame.style.left = '';
+  els.guideFrame.style.top = '';
+  els.guideFrame.style.width = '';
+  els.guideFrame.style.height = '';
+  els.guideFrame.style.aspectRatio = '';
+  els.guideFrame.style.transform = '';
+}
+
+function syncGuideFrameToDetection(detection) {
+  if (!els.guideFrame || !detection?.rect) return;
+  const displayRect = videoRectToDisplayRect(detection.rect);
+  if (!displayRect) return;
+
+  els.guideFrame.classList.add('is-tracking');
+  els.guideFrame.style.left = `${Math.round(displayRect.x)}px`;
+  els.guideFrame.style.top = `${Math.round(displayRect.y)}px`;
+  els.guideFrame.style.width = `${Math.round(displayRect.width)}px`;
+  els.guideFrame.style.height = `${Math.round(displayRect.height)}px`;
+  els.guideFrame.style.aspectRatio = 'auto';
+  els.guideFrame.style.transform = 'none';
 }
 
 function orderQuadPoints(points) {
@@ -1056,6 +1118,7 @@ function drawDetectedOverlay(detection, state = 'seeking') {
 
   const color = OVERLAY_COLORS[state] || OVERLAY_COLORS.seeking;
   setGuideColor(color, state);
+  syncGuideFrameToDetection(detection);
   ctx.save();
   ctx.lineWidth = 6;
   ctx.strokeStyle = color;
@@ -1099,24 +1162,48 @@ function getFrameCanvasFull() {
   return canvas;
 }
 
+function rotatedRectPoints(rotated) {
+  if (!rotated?.center || !rotated?.size) return null;
+  const cx = rotated.center.x;
+  const cy = rotated.center.y;
+  const w = rotated.size.width;
+  const h = rotated.size.height;
+  const angle = (rotated.angle || 0) * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const corners = [
+    { x: -w / 2, y: -h / 2 },
+    { x: w / 2, y: -h / 2 },
+    { x: w / 2, y: h / 2 },
+    { x: -w / 2, y: h / 2 }
+  ];
+
+  return corners.map(point => ({
+    x: Math.round(cx + point.x * cos - point.y * sin),
+    y: Math.round(cy + point.x * sin + point.y * cos)
+  }));
+}
+
 function detectCardRect() {
   if (!cvReady || !stream || !els.video.videoWidth) return null;
-  let src, gray, blur, edges, dilated, contours, hierarchy, kernel;
+  let src, gray, blur, edges, closed, dilated, contours, hierarchy, kernel;
   try {
     const canvas = getFrameCanvasFull();
     src = cv.imread(canvas);
     gray = new cv.Mat();
     blur = new cv.Mat();
     edges = new cv.Mat();
+    closed = new cv.Mat();
     dilated = new cv.Mat();
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
 
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    cv.Canny(blur, edges, 55, 145);
+    cv.Canny(blur, edges, 35, 118);
     kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, dilated, kernel);
+    cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
+    cv.dilate(closed, dilated, kernel);
     cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     let best = null;
@@ -1124,23 +1211,28 @@ function detectCardRect() {
     for (let i = 0; i < contours.size(); i += 1) {
       const cnt = contours.get(i);
       const area = cv.contourArea(cnt);
-      if (area < frameArea * 0.05 || area > frameArea * 0.88) {
+      if (area < frameArea * 0.012 || area > frameArea * 0.78) {
         cnt.delete();
         continue;
       }
 
       const peri = cv.arcLength(cnt, true);
       const approx = new cv.Mat();
-      cv.approxPolyDP(cnt, approx, 0.024 * peri, true);
+      cv.approxPolyDP(cnt, approx, 0.032 * peri, true);
       const rect = cv.boundingRect(cnt);
-      const ratio = Math.min(rect.width, rect.height) / Math.max(rect.width, rect.height);
+      const rotated = cv.minAreaRect(cnt);
+      const rw = Math.max(1, rotated?.size?.width || rect.width);
+      const rh = Math.max(1, rotated?.size?.height || rect.height);
+      const ratio = Math.min(rw, rh) / Math.max(rw, rh);
       const centerBias = 1 - Math.abs((rect.x + rect.width / 2) - canvas.width / 2) / (canvas.width / 2);
       const ratioScore = 1 - Math.min(1, Math.abs(ratio - 0.715) / 0.35);
-      const score = area * (0.65 + centerBias * 0.2 + ratioScore * 0.28);
+      const sizeScore = 1 - Math.min(1, Math.abs((area / frameArea) - 0.18) / 0.28);
+      const score = area * (0.55 + Math.max(0, centerBias) * 0.24 + ratioScore * 0.5 + sizeScore * 0.16);
 
-      if (approx.rows >= 4 && approx.rows <= 8 && ratio > 0.48 && ratio < 0.86) {
-        const points = [];
+      if (approx.rows >= 4 && approx.rows <= 12 && ratio > 0.38 && ratio < 0.9) {
+        let points = rotatedRectPoints(rotated) || [];
         if (approx.rows === 4) {
+          points = [];
           for (let j = 0; j < 4; j += 1) {
             points.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
           }
@@ -1155,7 +1247,7 @@ function detectCardRect() {
     console.warn('OpenCV detection failed:', err);
     return null;
   } finally {
-    [src, gray, blur, edges, dilated, hierarchy, kernel].forEach(mat => {
+    [src, gray, blur, edges, closed, dilated, hierarchy, kernel].forEach(mat => {
       try { if (mat) mat.delete(); } catch {}
     });
     try { if (contours) contours.delete(); } catch {}
@@ -1227,6 +1319,7 @@ function getNameStripRect(cardRect) {
 
 function drawGuideOcrOverlay(state = 'ready') {
   resizeOverlay();
+  resetGuideFramePosition();
   const ctx = els.detectCanvas.getContext('2d');
   ctx.clearRect(0, 0, els.detectCanvas.width, els.detectCanvas.height);
 
@@ -1272,17 +1365,23 @@ function drawGuideOcrOverlay(state = 'ready') {
 function processDetectionTick() {
   const now = Date.now();
   const detected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
+  const canPreviewVisual = !isOcrBusy && now - lastFastVisualTick >= FAST_VISUAL_EVERY_MS;
 
   if (!detected) {
     latestDetection = null;
     stableFrames = 0;
     stableSince = 0;
     if (!isOcrBusy) {
-      const idleState = currentCard ? 'complete' : 'ready';
+      const idleState = currentCard ? 'complete' : (lastOverlayState === 'candidate' ? 'candidate' : 'ready');
+      const detail = currentCard ? currentCard.number : (idleState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
       drawGuideOcrOverlay(idleState);
       els.detectStatus.textContent = 'GUIDE OCR';
-      setStatus(idleState, currentCard ? currentCard.number : '이름/번호 맞추기');
+      setStatus(idleState, detail);
       lastOverlayState = idleState;
+    }
+    if (canPreviewVisual) {
+      lastFastVisualTick = now;
+      previewVisualCandidates(null, '가이드 이미지 후보');
     }
     if (!isOcrBusy && now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1306,9 +1405,14 @@ function processDetectionTick() {
 
   if (!isStable) {
     els.detectStatus.textContent = 'GUIDE OCR';
-    setStatus('ready', '이름/번호 맞추기');
-    drawDetectedOverlay(detected, 'ready');
-    lastOverlayState = 'ready';
+    const trackingState = lastOverlayState === 'candidate' ? 'candidate' : 'ready';
+    setStatus(trackingState, trackingState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
+    drawDetectedOverlay(detected, trackingState);
+    lastOverlayState = trackingState;
+    if (canPreviewVisual) {
+      lastFastVisualTick = now;
+      previewVisualCandidates(detected, '외곽선 이미지 후보');
+    }
     if (now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
       ocrImageFromDetection(detected);
@@ -1323,8 +1427,13 @@ function processDetectionTick() {
     return;
   }
 
-  drawDetectedOverlay(detected, lastOverlayState === 'complete' ? 'complete' : 'ready');
+  const stableState = ['complete', 'candidate', 'noPrice'].includes(lastOverlayState) ? lastOverlayState : 'ready';
+  drawDetectedOverlay(detected, stableState);
   els.detectStatus.textContent = 'GUIDE OCR';
+  if (canPreviewVisual) {
+    lastFastVisualTick = now;
+    previewVisualCandidates(detected, '안정화 이미지 후보');
+  }
 
   if (now >= ocrCooldownUntil) {
     ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1441,7 +1550,7 @@ function captureNameFromGuide() {
   return cardCanvas ? cropNameStrip(cardCanvas) : null;
 }
 
-function captureNumberFromQuad(points) {
+function captureCardFromQuad(points) {
   if (!cvReady || !points || points.length !== 4) return null;
   const ordered = orderQuadPoints(points);
   if (!ordered) return null;
@@ -1472,7 +1581,7 @@ function captureNumberFromQuad(points) {
     matrix = cv.getPerspectiveTransform(srcTri, dstTri);
     cv.warpPerspective(src, dst, matrix, new cv.Size(targetWidth, targetHeight), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
     cv.imshow(warped, dst);
-    return cropNumberStrip(warped);
+    return warped;
   } catch (err) {
     console.warn('Perspective crop failed:', err);
     return null;
@@ -1483,16 +1592,16 @@ function captureNumberFromQuad(points) {
   }
 }
 
-function captureNumberFromRect(rect) {
+function captureCardFromRect(rect) {
   if (!rect) return null;
   const canvas = getFrameCanvasFull();
   const vw = canvas.width;
   const vh = canvas.height;
   const inner = {
-    x: rect.x + rect.width * 0.08,
-    y: rect.y + rect.height * 0.08,
-    width: rect.width * 0.84,
-    height: rect.height * 0.82
+    x: rect.x + rect.width * 0.03,
+    y: rect.y + rect.height * 0.03,
+    width: rect.width * 0.94,
+    height: rect.height * 0.94
   };
 
   const sx = Math.max(0, Math.round(inner.x));
@@ -1505,6 +1614,22 @@ function captureNumberFromRect(rect) {
   cardCanvas.width = sw;
   cardCanvas.height = sh;
   cardCanvas.getContext('2d', { willReadFrequently: true }).drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cardCanvas;
+}
+
+function captureCardFromDetection(detection) {
+  return captureCardFromQuad(detection?.points) ||
+    captureCardFromRect(detection?.rect);
+}
+
+function captureNumberFromQuad(points) {
+  const cardCanvas = captureCardFromQuad(points);
+  return cardCanvas ? cropNumberStrip(cardCanvas) : null;
+}
+
+function captureNumberFromRect(rect) {
+  const cardCanvas = captureCardFromRect(rect);
+  if (!cardCanvas) return null;
   return cropNumberStrip(cardCanvas);
 }
 
@@ -1544,12 +1669,21 @@ function preparePhotoOcrRegions(img) {
 }
 
 function captureOcrRegion(detection) {
-  return captureNumberFromGuide() ||
-    captureNumberFromQuad(detection?.points) ||
-    captureNumberFromRect(detection?.rect);
+  return captureNumberFromQuad(detection?.points) ||
+    captureNumberFromRect(detection?.rect) ||
+    captureNumberFromGuide();
 }
 
 function captureOcrRegions(detection) {
+  const detectedCardCanvas = captureCardFromDetection(detection);
+  if (detectedCardCanvas) {
+    return {
+      cardFrame: detectedCardCanvas,
+      numberFrame: cropNumberStrip(detectedCardCanvas),
+      nameFrame: cropNameStrip(detectedCardCanvas)
+    };
+  }
+
   const guideCardCanvas = captureCardCanvasFromGuide();
   if (guideCardCanvas) {
     return {
