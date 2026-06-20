@@ -1,0 +1,18 @@
+웹 배포 안내
+============
+
+권장: GitHub Pages
+1. 이 폴더의 파일들을 GitHub 저장소에 올립니다.
+2. Settings > Pages로 이동합니다.
+3. Deploy from a branch를 선택합니다.
+4. main 브랜치의 /root 또는 /docs를 선택합니다.
+5. 생성된 HTTPS 주소를 iPhone Safari에서 엽니다.
+
+Netlify, Cloudflare Pages 같은 정적 호스팅도 사용할 수 있습니다.
+
+HTTPS가 필요한 이유:
+- 브라우저 카메라(getUserMedia)는 일반적으로 HTTPS 또는 localhost에서만 안정적으로 허용됩니다.
+
+인터넷 연결:
+- 앱 데이터는 로컬 파일이지만 Tesseract.js와 OpenCV.js는 CDN에서 불러옵니다.
+- CDN을 로컬 파일로 바꾸지 않는 한 첫 실행에는 인터넷 연결이 필요합니다.

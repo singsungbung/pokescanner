@@ -1,0 +1,11 @@
+{
+  "name": "JP Card Lens M1S",
+  "short_name": "M1S Lens",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#080914",
+  "theme_color": "#ffb84d",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

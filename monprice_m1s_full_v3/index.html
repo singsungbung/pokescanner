@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#11131d" />
+  <title>MonPrice M1S Scanner</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="style.css" />
+  <script defer src="data/cards.js"></script>
+  <script defer src="data/prices.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script defer src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <button class="ghost" id="stopCamera" title="카메라 끄기" aria-label="카메라 끄기">×</button>
+      <label class="set-picker">
+        <span>세트</span>
+        <select id="setSelect">
+          <option value="JP|M1S">JP · M1S 메가심포니아</option>
+        </select>
+      </label>
+      <span class="flag" title="일판">JP</span>
+    </header>
+
+    <section class="scanner" aria-label="카드 스캐너">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="frameCanvas" hidden></canvas>
+      <canvas id="detectCanvas" class="detect-canvas"></canvas>
+      <div class="camera-placeholder" id="cameraPlaceholder">
+        <div class="big-icon">M1S</div>
+        <p>카메라를 켜고 카드를 비춰줘</p>
+        <small>카드 외곽선이 잡히면 하단 번호만 읽습니다.</small>
+      </div>
+      <div class="guide-frame" id="guideFrame">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <span class="guide-copy">카드 찾는 중</span>
+      </div>
+      <div class="scan-hud">
+        <span id="scanStatus">카드 찾는 중</span>
+        <span id="detectStatus">BOX OFF</span>
+      </div>
+    </section>
+
+    <section class="result-card is-empty" id="resultCard">
+      <div class="thumb" id="thumb">M1S</div>
+      <div class="info-grid">
+        <span>카드명</span><strong id="cardName">카드를 스캔하거나 검색</strong>
+        <span>세트</span><strong id="cardSet">JP · M1S 메가심포니아</strong>
+        <span>번호</span><strong id="cardNumber">—</strong>
+        <span>레어도</span><strong id="cardRarity">—</strong>
+      </div>
+      <div class="price-grid">
+        <div class="price-box">
+          <span>NM</span>
+          <strong id="nmPrice">—</strong>
+          <small>마지막 업데이트 기준</small>
+        </div>
+        <div class="price-box psa">
+          <span>PSA10</span>
+          <strong id="psaPrice">—</strong>
+          <small>마지막 업데이트 기준</small>
+        </div>
+      </div>
+      <div class="price-meta">
+        <span id="priceUpdated">업데이트 —</span>
+        <span id="priceConfidence">신뢰도 —</span>
+      </div>
+      <div class="status-row">
+        <span id="resultStatus">카드 찾는 중</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="startCamera">카메라 시작</button>
+      <button id="rescanBtn">다시 스캔</button>
+      <button id="toggleSearch">직접 검색</button>
+      <button id="addCollection">컬렉션 추가</button>
+      <button id="marketBtn">시세 보기</button>
+    </section>
+
+    <section class="search-panel is-collapsed" id="searchPanel">
+      <input id="searchInput" autocomplete="off" placeholder="예: 087/063, 090/063, アセロラ, 메가가디안" />
+      <div class="quick-row">
+        <button data-quick="087/063">087 SAR</button>
+        <button data-quick="090/063">아세로라 SAR</button>
+        <button data-quick="092/063">092 MUR</button>
+      </div>
+      <div class="search-results" id="searchResults"></div>
+    </section>
+
+    <section class="links-panel is-collapsed" id="marketPanel">
+      <button id="openCardrush">Cardrush</button>
+      <button id="openMercari">Mercari</button>
+      <button id="openYahoo">Yahoo 낙찰</button>
+      <button id="openGoogle">Google</button>
+    </section>
+
+    <section class="history-panel">
+      <h2>최근 스캔 기록</h2>
+      <div class="history-list" id="recentScans">최근 기록 없음</div>
+    </section>
+
+    <details class="collection-panel">
+      <summary>내 컬렉션</summary>
+      <div class="collection-form">
+        <label>상태
+          <select id="collectionCondition">
+            <option>NM</option>
+            <option>LP</option>
+            <option>PSA10</option>
+            <option>PSA9</option>
+            <option>기타</option>
+          </select>
+        </label>
+        <label>수량 <input id="collectionQty" type="number" value="1" min="1" step="1" /></label>
+        <label>구매가(JPY) <input id="purchasePrice" type="number" min="0" step="100" placeholder="선택" /></label>
+        <label>구매일 <input id="purchaseDate" type="date" /></label>
+        <label>메모 <input id="collectionNote" type="text" placeholder="선택" /></label>
+        <label>보관 위치 <input id="storageLocation" type="text" placeholder="선택" /></label>
+      </div>
+      <div class="collection-summary" id="collectionSummary">컬렉션 없음</div>
+      <div class="collection" id="collectionBox">컬렉션 없음</div>
+      <button id="clearCollection" class="danger">컬렉션 비우기</button>
+    </details>
+  </main>
+</body>
+</html>
