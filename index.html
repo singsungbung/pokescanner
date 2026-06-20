@@ -14,12 +14,13 @@
   <script defer src="app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#resultCard">스캔 결과로 이동</a>
   <main class="app-shell">
     <header class="topbar">
-      <button class="ghost" id="stopCamera" title="카메라 끄기" aria-label="카메라 끄기">×</button>
+      <button class="ghost" id="stopCamera" type="button" title="카메라 끄기" aria-label="카메라 끄기">×</button>
       <label class="set-picker">
         <span>세트</span>
-        <select id="setSelect">
+        <select id="setSelect" aria-label="스캔할 카드 세트">
           <option value="JP|M1S">JP · M1S 메가심포니아</option>
         </select>
       </label>
@@ -27,26 +28,26 @@
     </header>
 
     <section class="scanner" aria-label="카드 스캐너">
-      <video id="video" playsinline muted autoplay></video>
+      <video id="video" playsinline muted autoplay aria-hidden="true"></video>
       <canvas id="frameCanvas" hidden></canvas>
-      <canvas id="detectCanvas" class="detect-canvas"></canvas>
+      <canvas id="detectCanvas" class="detect-canvas" aria-hidden="true"></canvas>
       <div class="camera-placeholder" id="cameraPlaceholder">
         <div class="big-icon">M1S</div>
         <p>카메라를 켜고 카드를 비춰줘</p>
         <small>카드 이름과 하단 번호를 가이드 안에 맞추면 바로 읽습니다.</small>
       </div>
-      <div class="guide-frame" id="guideFrame">
+      <div class="guide-frame" id="guideFrame" aria-hidden="true">
         <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
         <span class="guide-copy">카드 찾는 중</span>
       </div>
       <div class="scan-hud">
-        <span id="scanStatus">카드 찾는 중</span>
-        <span id="detectStatus">BOX OFF</span>
+        <span id="scanStatus" role="status" aria-live="polite">카드 찾는 중</span>
+        <span id="detectStatus" aria-label="스캔 모드">대기</span>
       </div>
     </section>
 
-    <section class="result-card is-empty" id="resultCard">
-      <div class="thumb" id="thumb">M1S</div>
+    <section class="result-card is-empty" id="resultCard" aria-label="스캔 결과">
+      <div class="thumb" id="thumb" aria-hidden="true">M1S</div>
       <div class="info-grid">
         <span>카드명</span><strong id="cardName">카드를 스캔하거나 검색</strong>
         <span>세트</span><strong id="cardSet">JP · M1S 메가심포니아</strong>
@@ -70,41 +71,42 @@
         <span id="priceConfidence">신뢰도 —</span>
       </div>
       <div class="status-row">
-        <span id="resultStatus">카드 찾는 중</span>
+        <span id="resultStatus" role="status" aria-live="polite">카드 찾는 중</span>
       </div>
-      <div class="candidate-panel is-collapsed" id="candidatePanel">
+      <div class="candidate-panel is-collapsed" id="candidatePanel" role="region" aria-live="polite" aria-label="후보 카드">
         <div class="candidate-title" id="candidateTitle">후보 카드</div>
-        <div class="candidate-list" id="candidateList"></div>
+        <div class="candidate-list" id="candidateList" role="list"></div>
       </div>
     </section>
 
-    <section class="controls">
-      <button id="startCamera">카메라 시작</button>
+    <section class="controls" aria-label="스캔 조작">
+      <button id="startCamera" type="button">카메라 시작</button>
       <label class="file-btn">
         사진 스캔
-        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+        <input id="imageInput" type="file" accept="image/*" capture="environment" aria-label="사진으로 카드 스캔" />
       </label>
-      <button id="rescanBtn">다시 스캔</button>
-      <button id="toggleSearch">직접 검색</button>
-      <button id="addCollection">컬렉션 추가</button>
-      <button id="marketBtn">시세 보기</button>
+      <button id="rescanBtn" type="button">다시 스캔</button>
+      <button id="toggleSearch" type="button" aria-expanded="false" aria-controls="searchPanel">직접 검색</button>
+      <button id="addCollection" type="button">컬렉션 추가</button>
+      <button id="marketBtn" type="button" aria-expanded="false" aria-controls="marketPanel">시세 보기</button>
     </section>
 
     <section class="search-panel is-collapsed" id="searchPanel">
+      <label class="visually-hidden" for="searchInput">카드 이름 또는 번호 검색</label>
       <input id="searchInput" autocomplete="off" placeholder="예: 087/063, 090/063, アセロラ, 메가가디안" />
       <div class="quick-row">
-        <button data-quick="087/063">087 SAR</button>
-        <button data-quick="090/063">아세로라 SAR</button>
-        <button data-quick="092/063">092 MUR</button>
+        <button type="button" data-quick="087/063">087 SAR</button>
+        <button type="button" data-quick="090/063">아세로라 SAR</button>
+        <button type="button" data-quick="092/063">092 MUR</button>
       </div>
       <div class="search-results" id="searchResults"></div>
     </section>
 
     <section class="links-panel is-collapsed" id="marketPanel">
-      <button id="openCardrush">Cardrush</button>
-      <button id="openMercari">Mercari</button>
-      <button id="openYahoo">Yahoo 낙찰</button>
-      <button id="openGoogle">Google</button>
+      <button id="openCardrush" type="button">Cardrush</button>
+      <button id="openMercari" type="button">Mercari</button>
+      <button id="openYahoo" type="button">Yahoo 낙찰</button>
+      <button id="openGoogle" type="button">Google</button>
     </section>
 
     <section class="history-panel">
@@ -132,7 +134,7 @@
       </div>
       <div class="collection-summary" id="collectionSummary">컬렉션 없음</div>
       <div class="collection" id="collectionBox">컬렉션 없음</div>
-      <button id="clearCollection" class="danger">컬렉션 비우기</button>
+      <button id="clearCollection" class="danger" type="button">컬렉션 비우기</button>
     </details>
   </main>
 </body>

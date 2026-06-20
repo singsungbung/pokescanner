@@ -72,9 +72,9 @@ const priceByCardId = new Map(prices.map(price => [price.card_id, price]));
 const STATUS = {
   seeking: '카드 찾는 중',
   stabilizing: '카드 안정화 중',
-  ready: 'OCR 대기',
-  ocr: 'OCR 인식 중',
-  candidate: '후보 확인',
+  ready: '카드 맞추는 중',
+  ocr: '이미지 분석 중',
+  candidate: '후보 확인 중',
   complete: '인식 완료',
   failed: '인식 실패',
   missing: 'DB에 없는 카드',
@@ -254,6 +254,8 @@ function renderCandidateCards(candidates, detail = '') {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'candidate-item';
+    row.setAttribute('role', 'listitem');
+    row.setAttribute('aria-label', `${card.name_jp}, ${card.number}, ${card.rarity} 후보 선택`);
     const thumb = card.local_image_path || card.image_url
       ? `<img src="${card.local_image_path || card.image_url}" alt="">`
       : `<span>${candidateThumbText(card)}</span>`;
@@ -873,14 +875,14 @@ function renderSearch(query) {
 function waitForCv() {
   if (!USE_BOX_TRACKING) {
     cvReady = false;
-    els.detectStatus.textContent = 'GUIDE OCR';
+    els.detectStatus.textContent = '가이드 스캔';
     return;
   }
 
   const markReady = () => {
     if (window.cv && cv.Mat) {
       cvReady = true;
-      els.detectStatus.textContent = 'BOX READY';
+      els.detectStatus.textContent = '외곽선 준비';
       return true;
     }
     return false;
@@ -896,7 +898,7 @@ function waitForCv() {
   }, 250);
 
   setTimeout(() => {
-    if (!cvReady) els.detectStatus.textContent = 'BOX CDN 대기';
+    if (!cvReady) els.detectStatus.textContent = '외곽선 로딩';
   }, 2500);
 }
 
@@ -1229,7 +1231,7 @@ function processDetectionTick() {
     if (!isOcrBusy) {
       const idleState = currentCard ? 'complete' : 'ready';
       drawGuideOcrOverlay(idleState);
-      els.detectStatus.textContent = 'GUIDE OCR';
+      els.detectStatus.textContent = '가이드 스캔';
       setStatus(idleState, currentCard ? currentCard.number : '이름/번호 맞추기');
       lastOverlayState = idleState;
     }
@@ -1254,7 +1256,7 @@ function processDetectionTick() {
   const isStable = stableFrames >= STABLE_FRAME_COUNT && stableMs >= STABLE_MS;
 
   if (!isStable) {
-    els.detectStatus.textContent = 'GUIDE OCR';
+    els.detectStatus.textContent = '가이드 스캔';
     setStatus('ready', '이름/번호 맞추기');
     drawDetectedOverlay(detected, 'ready');
     lastOverlayState = 'ready';
@@ -1266,14 +1268,14 @@ function processDetectionTick() {
   }
 
   if (isOcrBusy) {
-    els.detectStatus.textContent = 'OCR';
+    els.detectStatus.textContent = '분석 중';
     drawDetectedOverlay(detected, 'ocr');
     lastOverlayState = 'ocr';
     return;
   }
 
   drawDetectedOverlay(detected, lastOverlayState === 'complete' ? 'complete' : 'ready');
-  els.detectStatus.textContent = 'GUIDE OCR';
+  els.detectStatus.textContent = '가이드 스캔';
 
   if (now >= ocrCooldownUntil) {
     ocrCooldownUntil = now + OCR_COOLDOWN_MS;
@@ -1543,7 +1545,7 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
   isOcrBusy = true;
   try {
     setStatus('ocr', sourceLabel);
-    els.detectStatus.textContent = 'OCR';
+    els.detectStatus.textContent = '분석 중';
     if (detection) drawDetectedOverlay(detection, 'ocr');
     else drawGuideOcrOverlay('ocr');
     lastOverlayState = 'ocr';
@@ -1754,7 +1756,7 @@ function stopCamera() {
   lastDetection = null;
   stableFrames = 0;
   stableSince = 0;
-  els.detectStatus.textContent = cvReady ? 'BOX READY' : 'BOX OFF';
+  els.detectStatus.textContent = cvReady ? '외곽선 준비' : '대기';
   setStatus('seeking');
 }
 
@@ -2009,9 +2011,14 @@ function init() {
   els.rescanBtn.addEventListener('click', resetScan);
   els.toggleSearch.addEventListener('click', () => {
     els.searchPanel.classList.toggle('is-collapsed');
-    if (!els.searchPanel.classList.contains('is-collapsed')) els.searchInput.focus();
+    const open = !els.searchPanel.classList.contains('is-collapsed');
+    els.toggleSearch.setAttribute('aria-expanded', String(open));
+    if (open) els.searchInput.focus();
   });
-  els.marketBtn.addEventListener('click', () => els.marketPanel.classList.toggle('is-collapsed'));
+  els.marketBtn.addEventListener('click', () => {
+    els.marketPanel.classList.toggle('is-collapsed');
+    els.marketBtn.setAttribute('aria-expanded', String(!els.marketPanel.classList.contains('is-collapsed')));
+  });
   els.addCollection.addEventListener('click', addCurrentToCollection);
   els.clearCollection.addEventListener('click', () => setCollection([]));
   els.openCardrush.addEventListener('click', () => openExternal('cardrush'));
