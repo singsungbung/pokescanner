@@ -386,7 +386,7 @@ video {
 .quick-row button { font-size: 13px; }
 
 .search-results,
-history-list,
+.history-list,
 .collection {
   display: grid;
   gap: 8px;

@@ -32,7 +32,11 @@
     const number = `${padded}/063`;
     const collectorNumber = `${n}/92`;
     const cardId = `${SET.language}-${SET.set_code}-${padded}`;
-    const searchKeywords = [en, jp, ko, number, collectorNumber, `${SET.set_code} ${padded}`, `${SET.set_code}-${padded}`, rarity].filter(Boolean);
+    const searchKeywords = [
+      en, jp, ko, number, collectorNumber, `${SET.set_code} ${padded}`,
+      `${SET.set_code}-${padded}`, rarity
+    ].filter(Boolean);
+
     return {
       card_id: cardId,
       id: cardId,
