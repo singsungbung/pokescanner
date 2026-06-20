@@ -95,11 +95,11 @@ const OVERLAY_COLORS = {
   noPrice: '#4aa3ff'
 };
 
-const DETECT_EVERY_MS = 180;
-const FAST_VISUAL_EVERY_MS = 620;
+const DETECT_EVERY_MS = 120;
+const FAST_VISUAL_EVERY_MS = 280;
 const STABLE_FRAME_COUNT = 2;
 const STABLE_MS = 260;
-const OCR_COOLDOWN_MS = 1250;
+const OCR_COOLDOWN_MS = 900;
 const RECENT_DEDUPE_MS = 30000;
 const USE_BOX_TRACKING = true;
 const CARD_ASPECT_RATIO = 63 / 88;
@@ -113,6 +113,11 @@ const VISUAL_CANDIDATE_SCORE = 32;
 const VISUAL_PREVIEW_SCORE = 26;
 const VISUAL_OCR_LOCK_FLOOR = 22;
 const VISUAL_MARGIN_LOCK = 3;
+const LOCK_HOLD_MS = 900;
+const LOCK_RECHECK_MS = 360;
+const LOCK_SWITCH_SCORE = 52;
+const LOCK_SWITCH_VOTES = 2;
+const LOCK_LOST_MS = 1100;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -134,8 +139,15 @@ let ocrCooldownUntil = 0;
 let ocrCandidateId = null;
 let ocrCandidateCount = 0;
 let lastOverlayState = 'seeking';
+let lockedCardId = null;
+let lockedAt = 0;
+let lockSwitchCardId = null;
+let lockSwitchCount = 0;
+let lastLockCheckTick = 0;
+let lastLockSeenAt = 0;
 let consecutiveNumberMisses = 0;
 let ocrVotes = [];
+const scanThumbByCardId = new Map();
 
 const recentStorageKey = 'm1s_recent_scans_v1';
 const collectionStorageKey = 'm1s_collection_v3';
@@ -189,7 +201,48 @@ function priceFor(card) {
   return card ? priceByCardId.get(card.card_id) || null : null;
 }
 
+function fallbackThumbText(card) {
+  return card ? `${card.rarity}\n${pad3(card.index)}` : selectedSet.set_code;
+}
+
+function setThumbContent(card) {
+  if (!els.thumb) return;
+  const src = card ? (scanThumbByCardId.get(card.card_id) || card.local_image_path || card.image_url) : '';
+  if (src) {
+    els.thumb.innerHTML = `<img src="${src}" alt="">`;
+    els.thumb.style.background = '#0f121a';
+    return;
+  }
+
+  els.thumb.textContent = card ? fallbackThumbText(card) : selectedSet.set_code;
+  els.thumb.style.background = card?.rarity === 'MUR'
+    ? 'linear-gradient(145deg,#fff4c0,#d9ccff 48%,#ffd166)'
+    : card?.rarity === 'SAR'
+      ? 'linear-gradient(145deg,#e8f7ff,#ffd166 54%,#ff9f43)'
+      : card?.rarity === 'SR'
+        ? 'linear-gradient(145deg,#ffffff,#d7e4ff 50%,#ffd166)'
+        : card?.rarity === 'AR'
+          ? 'linear-gradient(145deg,#fff2c4,#a7e6ff 52%,#ffd166)'
+          : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+}
+
+function rememberScanThumbnail(card, sourceCanvas) {
+  if (!card || !sourceCanvas) return;
+  try {
+    const out = document.createElement('canvas');
+    out.width = 152;
+    out.height = 212;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceCanvas, 0, 0, out.width, out.height);
+    scanThumbByCardId.set(card.card_id, out.toDataURL('image/jpeg', 0.82));
+  } catch (err) {
+    console.warn('scan thumb failed:', err);
+  }
+}
+
 function renderEmpty(statusKey = 'seeking') {
+  releaseScanLock();
   currentCard = null;
   els.resultCard?.classList.add('is-empty');
   hideCandidates();
@@ -201,8 +254,7 @@ function renderEmpty(statusKey = 'seeking') {
   els.psaPrice.textContent = '—';
   els.priceUpdated.textContent = '업데이트 —';
   els.priceConfidence.textContent = '신뢰도 —';
-  els.thumb.textContent = selectedSet.set_code;
-  els.thumb.style.background = 'linear-gradient(145deg, #eef3ff, #ffd166 48%, #f4a51c)';
+  setThumbContent(null);
   setStatus(statusKey);
 }
 
@@ -222,16 +274,7 @@ function renderCard(card) {
   els.psaPrice.textContent = hasPrice ? fmtJPY(price.psa10_jpy) : '가격 데이터 없음';
   els.priceUpdated.textContent = price?.updated_at ? `업데이트 ${price.updated_at}` : '업데이트 —';
   els.priceConfidence.textContent = price?.confidence ? `신뢰도 ${price.confidence}` : '신뢰도 —';
-  els.thumb.textContent = `${card.rarity}\n${pad3(card.index)}`;
-  els.thumb.style.background = card.rarity === 'MUR'
-    ? 'linear-gradient(145deg,#fff4c0,#d9ccff 48%,#ffd166)'
-    : card.rarity === 'SAR'
-      ? 'linear-gradient(145deg,#e8f7ff,#ffd166 54%,#ff9f43)'
-      : card.rarity === 'SR'
-        ? 'linear-gradient(145deg,#ffffff,#d7e4ff 50%,#ffd166)'
-        : card.rarity === 'AR'
-          ? 'linear-gradient(145deg,#fff2c4,#a7e6ff 52%,#ffd166)'
-        : 'linear-gradient(145deg,#eef3ff,#ffd166 48%,#f4a51c)';
+  setThumbContent(card);
 }
 
 function hideCandidates() {
@@ -240,7 +283,7 @@ function hideCandidates() {
 }
 
 function candidateThumbText(card) {
-  return `${card.rarity}\n${pad3(card.index)}`;
+  return fallbackThumbText(card);
 }
 
 function renderCandidateCards(candidates, detail = '') {
@@ -279,6 +322,7 @@ function renderCandidateCards(candidates, detail = '') {
     row.addEventListener('click', () => {
       clearCandidateVotes();
       confirmCard(card, 'candidate');
+      lockScan(card);
       hideCandidates();
     });
     els.candidateList.appendChild(row);
@@ -753,8 +797,101 @@ function previewVisualCandidates(detection = null, label = '실시간 이미지 
 
   handleOcrCandidates(candidates, detection, 'visual preview', {
     visualIndexActive: true,
-    confirmImmediately: isClearVisualCandidate(candidates)
+    confirmImmediately: isClearVisualCandidate(candidates),
+    cardFrame
   });
+  return true;
+}
+
+function isScanLocked() {
+  return Boolean(currentCard && lockedCardId === currentCard.card_id);
+}
+
+function lockScan(card) {
+  if (!card) return;
+  const now = Date.now();
+  lockedCardId = card.card_id;
+  lockedAt = now;
+  lastLockSeenAt = now;
+  lastLockCheckTick = 0;
+  lockSwitchCardId = null;
+  lockSwitchCount = 0;
+}
+
+function releaseScanLock() {
+  lockedCardId = null;
+  lockedAt = 0;
+  lastLockSeenAt = 0;
+  lastLockCheckTick = 0;
+  lockSwitchCardId = null;
+  lockSwitchCount = 0;
+}
+
+function reviewLockedCard(detection, now) {
+  if (!isScanLocked()) return false;
+  drawDetectedOverlay(detection, priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+  els.detectStatus.textContent = 'LOCK';
+
+  if (now - lastLockCheckTick < LOCK_RECHECK_MS) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return true;
+  }
+
+  lastLockCheckTick = now;
+  const cardFrame = captureCardFromDetection(detection);
+  if (!cardFrame) return true;
+
+  const candidates = scoreVisualCandidates(cardFrame, Math.max(18, VISUAL_PREVIEW_SCORE - 4));
+  updateDebugView(cardFrame, candidates, candidates.length ? '락온 검토 후보' : '락온 검토 후보 없음');
+  const top = candidates[0];
+
+  if (!top) {
+    if (now - lastLockSeenAt > LOCK_LOST_MS) {
+      releaseScanLock();
+      setStatus('seeking', '카드 없음');
+      drawGuideOcrOverlay('seeking');
+      lastOverlayState = 'seeking';
+    }
+    return true;
+  }
+
+  const sameCandidate = candidates.find(item => item.card.card_id === lockedCardId);
+  if (sameCandidate && sameCandidate.visualScore >= VISUAL_PREVIEW_SCORE) {
+    lastLockSeenAt = now;
+    lockSwitchCardId = null;
+    lockSwitchCount = 0;
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    lastOverlayState = priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice';
+    return true;
+  }
+
+  const canSwitch =
+    top.card.card_id !== lockedCardId &&
+    top.visualScore >= LOCK_SWITCH_SCORE &&
+    now - lockedAt >= LOCK_HOLD_MS;
+
+  if (canSwitch) {
+    if (lockSwitchCardId === top.card.card_id) lockSwitchCount += 1;
+    else {
+      lockSwitchCardId = top.card.card_id;
+      lockSwitchCount = 1;
+    }
+
+    setStatus('candidate', `${top.card.number} 새 카드 검토 ${lockSwitchCount}/${LOCK_SWITCH_VOTES}`);
+    drawDetectedOverlay(detection, 'candidate');
+    lastOverlayState = 'candidate';
+
+    if (lockSwitchCount >= LOCK_SWITCH_VOTES) {
+      rememberScanThumbnail(top.card, cardFrame);
+      confirmCard(top.card, 'scan');
+      lockScan(top.card);
+      drawDetectedOverlay(detection, priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice');
+      lastOverlayState = priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice';
+    }
+    return true;
+  }
+
+  setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
   return true;
 }
 
@@ -1371,24 +1508,41 @@ function processDetectionTick() {
     latestDetection = null;
     stableFrames = 0;
     stableSince = 0;
+
+    if (isScanLocked()) {
+      if (now - lastLockSeenAt > LOCK_LOST_MS) {
+        releaseScanLock();
+        drawGuideOcrOverlay('seeking');
+        setStatus('seeking', '카드 없음');
+        lastOverlayState = 'seeking';
+      } else {
+        drawGuideOcrOverlay(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+        setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+      }
+      els.detectStatus.textContent = 'LOCK';
+      return;
+    }
+
     if (!isOcrBusy) {
       const idleState = currentCard ? 'complete' : (lastOverlayState === 'candidate' ? 'candidate' : 'ready');
-      const detail = currentCard ? currentCard.number : (idleState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
+      const detail = currentCard ? `${currentCard.number} · 카드 대기` : (idleState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
       drawGuideOcrOverlay(idleState);
       els.detectStatus.textContent = 'GUIDE OCR';
       setStatus(idleState, detail);
       lastOverlayState = idleState;
     }
-    if (canPreviewVisual) {
+    if (!currentCard && canPreviewVisual) {
       lastFastVisualTick = now;
       previewVisualCandidates(null, '가이드 이미지 후보');
     }
-    if (!isOcrBusy && now >= ocrCooldownUntil) {
+    if (!currentCard && !isOcrBusy && now >= ocrCooldownUntil) {
       ocrCooldownUntil = now + OCR_COOLDOWN_MS;
       ocrImageFromDetection(null);
     }
     return;
   }
+
+  if (reviewLockedCard(detected, now)) return;
 
   latestDetection = detected;
   const similar = detectionSimilarity(detected, lastDetection);
@@ -1731,7 +1885,8 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     const visualCandidates = scoreVisualCandidates(cardFrame);
     const visualOptions = {
       ...options,
-      visualIndexActive: Boolean(visualIndex.length && cardFrame)
+      visualIndexActive: Boolean(visualIndex.length && cardFrame),
+      cardFrame
     };
     updateDebugView(cardFrame, visualCandidates, visualCandidates.length ? 'visual 후보' : 'visual 후보 없음');
 
@@ -1819,6 +1974,10 @@ async function ocrImageFromDetection(detection) {
 }
 
 function handleOcrFailure(statusKey, detail, detection, rawText) {
+  if (isScanLocked()) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return;
+  }
   console.log('OCR miss:', statusKey, detail, rawText);
   ocrCandidateId = null;
   ocrCandidateCount = 0;
@@ -1830,6 +1989,10 @@ function handleOcrFailure(statusKey, detail, detection, rawText) {
 }
 
 function handleOcrCandidates(candidates, detection, rawText, options = {}) {
+  if (isScanLocked()) {
+    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    return;
+  }
   const voted = updateCandidateVotes(candidates);
   const display = voted.length ? voted : candidates.slice(0, 3);
   const top = display[0];
@@ -1882,7 +2045,9 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
     return;
   }
 
-  confirmCard(card, 'scan');
+  const thumbCanvas = options.cardFrame || captureCardFromDetection(detection);
+  confirmCard(card, 'scan', thumbCanvas);
+  lockScan(card);
   clearCandidateVotes();
   if (detection) drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   else drawGuideOcrOverlay(priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
@@ -1891,7 +2056,8 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
   console.log('Detected:', card.card_id, rawText);
 }
 
-function confirmCard(card, source = 'scan') {
+function confirmCard(card, source = 'scan', thumbCanvas = null) {
+  rememberScanThumbnail(card, thumbCanvas);
   renderCard(card);
   addRecentScan(card, source);
   renderRecentScans();
@@ -1935,6 +2101,7 @@ function stopCamera() {
   clearOverlay();
   latestDetection = null;
   lastDetection = null;
+  releaseScanLock();
   stableFrames = 0;
   stableSince = 0;
   els.detectStatus.textContent = cvReady ? 'BOX READY' : 'BOX OFF';
@@ -1945,6 +2112,7 @@ function resetScan() {
   currentCard = null;
   ocrCandidateId = null;
   ocrCandidateCount = 0;
+  releaseScanLock();
   clearCandidateVotes();
   lastOverlayState = 'seeking';
   renderEmpty('seeking');
