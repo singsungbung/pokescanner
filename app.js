@@ -118,6 +118,10 @@ const LOCK_RECHECK_MS = 360;
 const LOCK_SWITCH_SCORE = 52;
 const LOCK_SWITCH_VOTES = 2;
 const LOCK_LOST_MS = 1100;
+const TRACK_SMOOTH_ALPHA = 0.34;
+const LOCK_TRACK_SMOOTH_ALPHA = 0.2;
+const TRACK_JUMP_LIMIT = 0.5;
+const TRACK_RESET_MS = 760;
 
 let selectedSet = sets[0];
 let currentCard = null;
@@ -145,6 +149,9 @@ let lockSwitchCardId = null;
 let lockSwitchCount = 0;
 let lastLockCheckTick = 0;
 let lastLockSeenAt = 0;
+let smoothedDetection = null;
+let smoothedDetectionAt = 0;
+let rejectedDetectionJumps = 0;
 let consecutiveNumberMisses = 0;
 let ocrVotes = [];
 const scanThumbByCardId = new Map();
@@ -790,11 +797,15 @@ function updateDebugView(cardCanvas, candidates = [], label = '') {
 
 function previewVisualCandidates(detection = null, label = '실시간 이미지 후보') {
   if (!visualIndex.length || isOcrBusy) return false;
-  const cardFrame = captureCardFromDetection(detection) || captureCardCanvasFromGuide();
+  const selectedFrame = selectBestCardFrame(detection, VISUAL_PREVIEW_SCORE, true);
+  const cardFrame = selectedFrame?.canvas || null;
   if (!cardFrame) return false;
 
-  const candidates = scoreVisualCandidates(cardFrame, VISUAL_PREVIEW_SCORE);
-  updateDebugView(cardFrame, candidates, candidates.length ? label : 'visual 후보 없음');
+  const candidates = selectedFrame.candidates?.length
+    ? selectedFrame.candidates
+    : scoreVisualCandidates(cardFrame, VISUAL_PREVIEW_SCORE);
+  const debugLabel = selectedFrame?.label ? `${label} · ${selectedFrame.label}` : label;
+  updateDebugView(cardFrame, candidates, candidates.length ? debugLabel : `${debugLabel} · 후보 없음`);
   if (!candidates.length) return false;
 
   handleOcrCandidates(candidates, detection, 'visual preview', {
@@ -827,6 +838,7 @@ function releaseScanLock() {
   lastLockCheckTick = 0;
   lockSwitchCardId = null;
   lockSwitchCount = 0;
+  resetSmoothedDetection();
 }
 
 function reviewLockedCard(detection, now) {
@@ -840,11 +852,15 @@ function reviewLockedCard(detection, now) {
   }
 
   lastLockCheckTick = now;
-  const cardFrame = captureCardFromDetection(detection);
+  const selectedFrame = selectBestCardFrame(detection, Math.max(18, VISUAL_PREVIEW_SCORE - 4), true);
+  const cardFrame = selectedFrame?.canvas || null;
   if (!cardFrame) return true;
 
-  const candidates = scoreVisualCandidates(cardFrame, Math.max(18, VISUAL_PREVIEW_SCORE - 4));
-  updateDebugView(cardFrame, candidates, candidates.length ? '락온 검토 후보' : '락온 검토 후보 없음');
+  const candidates = selectedFrame.candidates?.length
+    ? selectedFrame.candidates
+    : scoreVisualCandidates(cardFrame, Math.max(18, VISUAL_PREVIEW_SCORE - 4));
+  const debugLabel = selectedFrame?.label ? `락온 검토 후보 · ${selectedFrame.label}` : '락온 검토 후보';
+  updateDebugView(cardFrame, candidates, candidates.length ? debugLabel : `${debugLabel} 없음`);
   const top = candidates[0];
 
   if (!top) {
@@ -1408,6 +1424,87 @@ function detectionSimilarity(a, b) {
   return centerDelta < 0.055 && widthDelta < 0.12 && heightDelta < 0.12;
 }
 
+function cloneDetection(detection) {
+  if (!detection?.rect) return null;
+  return {
+    ...detection,
+    rect: { ...detection.rect },
+    points: detection.points?.map(point => ({ x: point.x, y: point.y })) || null
+  };
+}
+
+function detectionJumpRatio(a, b) {
+  if (!a?.rect || !b?.rect) return 0;
+  const ar = a.rect;
+  const br = b.rect;
+  const acx = ar.x + ar.width / 2;
+  const acy = ar.y + ar.height / 2;
+  const bcx = br.x + br.width / 2;
+  const bcy = br.y + br.height / 2;
+  const diagonal = Math.hypot(br.width, br.height) || 1;
+  const centerDelta = Math.hypot(acx - bcx, acy - bcy) / diagonal;
+  const widthDelta = Math.abs(ar.width - br.width) / Math.max(ar.width, br.width);
+  const heightDelta = Math.abs(ar.height - br.height) / Math.max(ar.height, br.height);
+  return centerDelta + widthDelta * 0.55 + heightDelta * 0.55;
+}
+
+function blendValue(from, to, alpha) {
+  return from + (to - from) * alpha;
+}
+
+function blendRect(from, to, alpha) {
+  return {
+    x: Math.round(blendValue(from.x, to.x, alpha)),
+    y: Math.round(blendValue(from.y, to.y, alpha)),
+    width: Math.round(blendValue(from.width, to.width, alpha)),
+    height: Math.round(blendValue(from.height, to.height, alpha))
+  };
+}
+
+function blendPoints(fromPoints, toPoints, alpha) {
+  const from = orderQuadPoints(fromPoints);
+  const to = orderQuadPoints(toPoints);
+  if (!from || !to) return toPoints?.map(point => ({ x: point.x, y: point.y })) || null;
+  return to.map((point, index) => ({
+    x: Math.round(blendValue(from[index].x, point.x, alpha)),
+    y: Math.round(blendValue(from[index].y, point.y, alpha))
+  }));
+}
+
+function resetSmoothedDetection() {
+  smoothedDetection = null;
+  smoothedDetectionAt = 0;
+  rejectedDetectionJumps = 0;
+}
+
+function stabilizeDetection(rawDetection, now) {
+  if (!rawDetection?.rect) return null;
+  const raw = cloneDetection(rawDetection);
+  if (!smoothedDetection || now - smoothedDetectionAt > TRACK_RESET_MS) {
+    smoothedDetection = raw;
+    smoothedDetectionAt = now;
+    rejectedDetectionJumps = 0;
+    return cloneDetection(smoothedDetection);
+  }
+
+  const jump = detectionJumpRatio(raw, smoothedDetection);
+  if (isScanLocked() && jump > TRACK_JUMP_LIMIT && rejectedDetectionJumps < 1) {
+    rejectedDetectionJumps += 1;
+    smoothedDetectionAt = now;
+    return cloneDetection(smoothedDetection);
+  }
+
+  rejectedDetectionJumps = 0;
+  const alpha = isScanLocked() ? LOCK_TRACK_SMOOTH_ALPHA : TRACK_SMOOTH_ALPHA;
+  smoothedDetection = {
+    ...raw,
+    rect: blendRect(smoothedDetection.rect, raw.rect, alpha),
+    points: blendPoints(smoothedDetection.points, raw.points, alpha)
+  };
+  smoothedDetectionAt = now;
+  return cloneDetection(smoothedDetection);
+}
+
 function centeredCardRect(width, height, widthRatio = 0.68, heightRatio = 0.86) {
   const maxWidth = width * widthRatio;
   const maxHeight = height * heightRatio;
@@ -1503,7 +1600,8 @@ function drawGuideOcrOverlay(state = 'ready') {
 
 function processDetectionTick() {
   const now = Date.now();
-  const detected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
+  const rawDetected = USE_BOX_TRACKING && cvReady ? detectCardRect() : null;
+  const detected = rawDetected ? stabilizeDetection(rawDetected, now) : null;
   const canPreviewVisual = !isOcrBusy && now - lastFastVisualTick >= FAST_VISUAL_EVERY_MS;
 
   if (!detected) {
@@ -1512,19 +1610,23 @@ function processDetectionTick() {
     stableSince = 0;
 
     if (isScanLocked()) {
+      const heldDetection = smoothedDetection ? cloneDetection(smoothedDetection) : null;
       if (now - lastLockSeenAt > LOCK_LOST_MS) {
         releaseScanLock();
+        resetSmoothedDetection();
         drawGuideOcrOverlay('seeking');
         setStatus('seeking', '카드 없음');
         lastOverlayState = 'seeking';
       } else {
-        drawGuideOcrOverlay(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+        if (heldDetection) drawDetectedOverlay(heldDetection, priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
+        else drawGuideOcrOverlay(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice');
         setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
       }
       els.detectStatus.textContent = '락온';
       return;
     }
 
+    resetSmoothedDetection();
     if (!isOcrBusy) {
       const idleState = currentCard ? 'complete' : (lastOverlayState === 'candidate' ? 'candidate' : 'ready');
       const detail = currentCard ? `${currentCard.number} · 카드 대기` : (idleState === 'candidate' ? '후보 확인 중' : '이름/번호 맞추기');
@@ -1706,9 +1808,35 @@ function captureNameFromGuide() {
   return cardCanvas ? cropNameStrip(cardCanvas) : null;
 }
 
-function captureCardFromQuad(points) {
-  if (!cvReady || !points || points.length !== 4) return null;
+function insetQuadPoints(points, inset = 0) {
   const ordered = orderQuadPoints(points);
+  if (!ordered || inset <= 0) return ordered;
+  const center = ordered.reduce((sum, point) => ({
+    x: sum.x + point.x / ordered.length,
+    y: sum.y + point.y / ordered.length
+  }), { x: 0, y: 0 });
+  const scale = Math.max(0.68, 1 - inset * 2);
+  return ordered.map(point => ({
+    x: center.x + (point.x - center.x) * scale,
+    y: center.y + (point.y - center.y) * scale
+  }));
+}
+
+function insetRect(rect, inset = 0) {
+  if (!rect) return null;
+  const ix = rect.width * inset;
+  const iy = rect.height * inset;
+  return {
+    x: rect.x + ix,
+    y: rect.y + iy,
+    width: rect.width - ix * 2,
+    height: rect.height - iy * 2
+  };
+}
+
+function captureCardFromQuad(points, inset = 0) {
+  if (!cvReady || !points || points.length !== 4) return null;
+  const ordered = insetQuadPoints(points, inset);
   if (!ordered) return null;
 
   let src, dst, matrix, srcTri, dstTri;
@@ -1748,17 +1876,12 @@ function captureCardFromQuad(points) {
   }
 }
 
-function captureCardFromRect(rect) {
+function captureCardFromRect(rect, inset = 0.03) {
   if (!rect) return null;
   const canvas = getFrameCanvasFull();
   const vw = canvas.width;
   const vh = canvas.height;
-  const inner = {
-    x: rect.x + rect.width * 0.03,
-    y: rect.y + rect.height * 0.03,
-    width: rect.width * 0.94,
-    height: rect.height * 0.94
-  };
+  const inner = insetRect(rect, inset);
 
   const sx = Math.max(0, Math.round(inner.x));
   const sy = Math.max(0, Math.round(inner.y));
@@ -1776,6 +1899,48 @@ function captureCardFromRect(rect) {
 function captureCardFromDetection(detection) {
   return captureCardFromQuad(detection?.points) ||
     captureCardFromRect(detection?.rect);
+}
+
+function pushFrameVariant(variants, label, canvas) {
+  if (!canvas || canvas.width < 20 || canvas.height < 20) return;
+  variants.push({ label, canvas });
+}
+
+function captureCardFrameVariants(detection, includeGuide = true) {
+  const variants = [];
+  if (detection?.points?.length === 4 && cvReady) {
+    pushFrameVariant(variants, '외곽선 보정', captureCardFromQuad(detection.points, 0));
+    pushFrameVariant(variants, '외곽선 안쪽', captureCardFromQuad(detection.points, 0.055));
+  }
+  if (detection?.rect) {
+    pushFrameVariant(variants, '박스 crop', captureCardFromRect(detection.rect, 0.035));
+    pushFrameVariant(variants, '탑로더 안쪽', captureCardFromRect(detection.rect, 0.095));
+  }
+  if (includeGuide) {
+    pushFrameVariant(variants, '가이드 crop', captureCardCanvasFromGuide());
+  }
+  return variants;
+}
+
+function selectBestCardFrame(detection, minScore = VISUAL_PREVIEW_SCORE, includeGuide = true) {
+  const variants = captureCardFrameVariants(detection, includeGuide);
+  if (!variants.length) return null;
+  if (!visualIndex.length) {
+    return { ...variants[0], candidates: [] };
+  }
+
+  let best = null;
+  for (const variant of variants) {
+    const candidates = scoreVisualCandidates(variant.canvas, minScore);
+    const top = candidates[0];
+    const sameLockBonus = top?.card?.card_id === lockedCardId ? 5 : 0;
+    const marginBonus = Math.min(8, Math.max(0, visualMargin(candidates)));
+    const cropBonus = /안쪽/.test(variant.label) ? 1.5 : 0;
+    const rank = top ? (top.visualScore || 0) + marginBonus + sameLockBonus + cropBonus : -1;
+    if (!best || rank > best.rank) best = { ...variant, candidates, rank };
+  }
+
+  return best || { ...variants[0], candidates: [] };
 }
 
 function captureNumberFromQuad(points) {
@@ -1831,12 +1996,12 @@ function captureOcrRegion(detection) {
 }
 
 function captureOcrRegions(detection) {
-  const detectedCardCanvas = captureCardFromDetection(detection);
-  if (detectedCardCanvas) {
+  const selectedFrame = selectBestCardFrame(detection, Math.max(18, VISUAL_PREVIEW_SCORE - 6), true);
+  if (selectedFrame?.canvas) {
     return {
-      cardFrame: detectedCardCanvas,
-      numberFrame: cropNumberStrip(detectedCardCanvas),
-      nameFrame: cropNameStrip(detectedCardCanvas)
+      cardFrame: selectedFrame.canvas,
+      numberFrame: cropNumberStrip(selectedFrame.canvas),
+      nameFrame: cropNameStrip(selectedFrame.canvas)
     };
   }
 

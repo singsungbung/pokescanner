@@ -1,4 +1,4 @@
-const CACHE = 'm1s-scanner-v17-lockon-ui';
+const CACHE = 'm1s-scanner-v18-track-crops';
 const ASSETS = [
   './',
   './index.html',
