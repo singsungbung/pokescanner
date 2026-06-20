@@ -99,6 +99,7 @@ let currentCard = null;
 let stream = null;
 let cvReady = false;
 let isOcrBusy = false;
+let isNameOcrBusy = false;
 let ocrWorkerPromise = null;
 let nameOcrWorkerPromise = null;
 let detectionLoopId = null;
@@ -419,7 +420,6 @@ async function getNameOcrWorker() {
   await ensureTesseract();
   if (!nameOcrWorkerPromise) {
     nameOcrWorkerPromise = (async () => {
-      setStatus('ocr', '이름 보조 엔진 준비');
       const worker = await Tesseract.createWorker('jpn+eng');
       try {
         await worker.setParameters({
@@ -457,6 +457,23 @@ async function runNameOcr(imageLike) {
   const worker = await getNameOcrWorker();
   const result = await worker.recognize(imageLike);
   return result?.data?.text || '';
+}
+
+function startNameMatchOcr(nameFrame) {
+  if (!nameFrame || isNameOcrBusy) return null;
+  isNameOcrBusy = true;
+  return runNameOcr(nameFrame)
+    .then(nameText => ({
+      text: nameText,
+      card: findCardByNameText(nameText)
+    }))
+    .catch(err => {
+      console.warn('name OCR failed:', err);
+      return { text: '', card: null, error: err };
+    })
+    .finally(() => {
+      isNameOcrBusy = false;
+    });
 }
 
 function resizeOverlay() {
@@ -992,18 +1009,18 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
     else drawGuideOcrOverlay('ocr');
     lastOverlayState = 'ocr';
 
+    const nameTask = startNameMatchOcr(nameFrame);
     const text = await runNumberOcr(numberFrame);
-    let parsed = parseCardNumber(text, { strict: true });
+    const parsed = parseCardNumber(text, { strict: true });
     if (!parsed) {
       consecutiveNumberMisses += 1;
-      const shouldTryName = Boolean(nameFrame) && (options.confirmImmediately || consecutiveNumberMisses >= 2);
-      if (shouldTryName) {
-        setStatus('ocr', '이름 보조 인식');
-        const nameText = await runNameOcr(nameFrame);
-        const nameCard = findCardByNameText(nameText);
-        if (nameCard) {
+      if (nameTask) {
+        setStatus('ocr', '이름/번호 비교 중');
+        const nameResult = await nameTask;
+        if (nameResult?.card) {
           consecutiveNumberMisses = 0;
-          handleDetectedCard(nameCard, detection, `${text}\n${nameText}`, { ...options, confirmImmediately: true });
+          const rawText = [text, nameResult.text].filter(Boolean).join('\n');
+          handleDetectedCard(nameResult.card, detection, rawText, { ...options, confirmImmediately: true });
           return;
         }
       }
@@ -1013,14 +1030,13 @@ async function ocrPreparedRegions(regions, sourceLabel = '번호 이미지', det
 
     const card = findCardByParsedNumber(parsed);
     if (!card) {
-      const shouldTryName = Boolean(nameFrame) && (options.confirmImmediately || consecutiveNumberMisses >= 1);
-      if (shouldTryName) {
-        setStatus('ocr', '이름 보조 인식');
-        const nameText = await runNameOcr(nameFrame);
-        const nameCard = findCardByNameText(nameText);
-        if (nameCard) {
+      if (nameTask) {
+        setStatus('ocr', '이름/번호 비교 중');
+        const nameResult = await nameTask;
+        if (nameResult?.card) {
           consecutiveNumberMisses = 0;
-          handleDetectedCard(nameCard, detection, `${text}\n${nameText}`, { ...options, confirmImmediately: true });
+          const rawText = [text, nameResult.text].filter(Boolean).join('\n');
+          handleDetectedCard(nameResult.card, detection, rawText, { ...options, confirmImmediately: true });
           return;
         }
       }
