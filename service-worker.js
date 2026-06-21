@@ -1,4 +1,4 @@
-const CACHE = 'm1s-scanner-v19-diagnostics';
+const CACHE = 'uxrp-scanner-v20-rename';
 const ASSETS = [
   './',
   './index.html',

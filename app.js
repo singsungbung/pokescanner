@@ -1,4 +1,4 @@
-/* MonPrice M1S Scanner
+/* UXRP_Scanner
    Static HTML/CSS/JS app.
    - Card DB and price DB are loaded separately.
    - Live detection runs continuously, OCR runs only after stable detection.
@@ -2423,7 +2423,7 @@ function downloadDebugSamples() {
 
   const payload = {
     exported_at: new Date().toISOString(),
-    app: 'MonPrice M1S Scanner',
+    app: 'UXRP_Scanner',
     set: selectedSet,
     samples
   };

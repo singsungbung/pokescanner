@@ -1,6 +1,6 @@
 {
-  "name": "JP Card Lens M1S",
-  "short_name": "M1S Lens",
+  "name": "UXRP_Scanner",
+  "short_name": "UXRP",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#080914",
