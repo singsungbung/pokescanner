@@ -16,6 +16,8 @@ const els = {
   detectStatus: $('detectStatus'),
   resultCard: $('resultCard'),
   resultStatus: $('resultStatus'),
+  bottomSheet: $('bottomSheet'),
+  sheetGrip: $('sheetGrip'),
   setSelect: $('setSelect'),
   startCamera: $('startCamera'),
   imageInput: $('imageInput'),
@@ -214,6 +216,33 @@ function setGuideColor(color, state = '') {
   });
 }
 
+function setSheetState(state = 'peek') {
+  if (!els.bottomSheet) return;
+  const next = ['collapsed', 'peek', 'expanded'].includes(state) ? state : 'peek';
+  els.bottomSheet.dataset.sheetState = next;
+  els.sheetGrip?.setAttribute('aria-expanded', String(next === 'expanded'));
+  els.sheetGrip?.setAttribute(
+    'aria-label',
+    next === 'expanded' ? '스캔 정보 패널 줄이기' : '스캔 정보 패널 열기'
+  );
+}
+
+function currentSheetState() {
+  return els.bottomSheet?.dataset.sheetState || 'collapsed';
+}
+
+function revealSheetForResult() {
+  if (currentSheetState() === 'collapsed') setSheetState('peek');
+}
+
+function expandSheet() {
+  setSheetState('expanded');
+}
+
+function collapseSheet() {
+  setSheetState('collapsed');
+}
+
 function priceHasValue(price) {
   return Boolean(price) && (isFiniteNumber(price.nm_jpy) || isFiniteNumber(price.psa10_jpy));
 }
@@ -298,6 +327,7 @@ function renderEmpty(statusKey = 'seeking') {
   els.priceConfidence.textContent = '신뢰도 —';
   setThumbContent(null);
   setStatus(statusKey);
+  collapseSheet();
 }
 
 function renderCard(card) {
@@ -317,6 +347,7 @@ function renderCard(card) {
   els.priceUpdated.textContent = price?.updated_at ? `업데이트 ${price.updated_at}` : '업데이트 —';
   els.priceConfidence.textContent = price?.confidence ? `신뢰도 ${price.confidence}` : '신뢰도 —';
   setThumbContent(card);
+  revealSheetForResult();
 }
 
 function hideCandidates() {
@@ -338,6 +369,7 @@ function renderCandidateCards(candidates, detail = '') {
 
   els.resultCard?.classList.remove('is-empty');
   els.candidatePanel.classList.remove('is-collapsed');
+  revealSheetForResult();
   els.candidateTitle.textContent = detail || `이 카드일 가능성이 높음 · ${top.score}점`;
   els.candidateList.innerHTML = '';
 
@@ -2357,6 +2389,7 @@ function stopCamera() {
   stableSince = 0;
   els.detectStatus.textContent = cvReady ? '외곽선 준비' : '대기';
   setStatus('seeking');
+  collapseSheet();
 }
 
 function resetScan() {
@@ -2379,6 +2412,7 @@ function openExternal(kind) {
   if (!currentCard) {
     setStatus('failed', '먼저 카드 선택');
     els.searchPanel?.classList.remove('is-collapsed');
+    expandSheet();
     return;
   }
   const q = encodeURIComponent(getMarketSearchTerm(currentCard));
@@ -2660,6 +2694,7 @@ function addCurrentToCollection() {
   if (!currentCard) {
     setStatus('failed', '먼저 카드 선택');
     els.searchPanel?.classList.remove('is-collapsed');
+    expandSheet();
     return;
   }
 
@@ -2698,9 +2733,64 @@ function initSetPicker() {
   });
 }
 
+function initBottomSheet() {
+  if (!els.bottomSheet || !els.sheetGrip) return;
+  let startY = 0;
+  let lastY = 0;
+  let isDragging = false;
+  let suppressClick = false;
+
+  const nextOnTap = () => {
+    const state = currentSheetState();
+    if (state === 'collapsed') setSheetState('peek');
+    else if (state === 'peek') setSheetState('expanded');
+    else setSheetState('peek');
+  };
+
+  els.sheetGrip.addEventListener('click', () => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    nextOnTap();
+  });
+
+  els.sheetGrip.addEventListener('pointerdown', event => {
+    isDragging = true;
+    startY = event.clientY;
+    lastY = event.clientY;
+    els.bottomSheet.classList.add('is-dragging');
+    els.sheetGrip.setPointerCapture?.(event.pointerId);
+  });
+
+  els.sheetGrip.addEventListener('pointermove', event => {
+    if (!isDragging) return;
+    lastY = event.clientY;
+  });
+
+  const finishDrag = () => {
+    if (!isDragging) return;
+    isDragging = false;
+    els.bottomSheet.classList.remove('is-dragging');
+    const delta = lastY - startY;
+    if (Math.abs(delta) < 34) return;
+
+    suppressClick = true;
+    if (delta < 0) {
+      setSheetState(currentSheetState() === 'collapsed' ? 'peek' : 'expanded');
+    } else {
+      setSheetState(currentSheetState() === 'expanded' ? 'peek' : 'collapsed');
+    }
+  };
+
+  els.sheetGrip.addEventListener('pointerup', finishDrag);
+  els.sheetGrip.addEventListener('pointercancel', finishDrag);
+}
+
 function init() {
   waitForCv();
   initSetPicker();
+  initBottomSheet();
   renderEmpty('seeking');
   renderRecentScans();
   renderCollection();
@@ -2709,6 +2799,7 @@ function init() {
   els.searchInput.addEventListener('input', e => renderSearch(e.target.value));
   document.querySelectorAll('[data-quick]').forEach(btn => btn.addEventListener('click', () => {
     els.searchPanel?.classList.remove('is-collapsed');
+    expandSheet();
     els.searchInput.value = btn.dataset.quick;
     renderSearch(btn.dataset.quick);
     const card = findCardForSearch(btn.dataset.quick);
@@ -2738,11 +2829,16 @@ function init() {
     els.searchPanel.classList.toggle('is-collapsed');
     const open = !els.searchPanel.classList.contains('is-collapsed');
     els.toggleSearch.setAttribute('aria-expanded', String(open));
-    if (open) els.searchInput.focus();
+    if (open) {
+      expandSheet();
+      els.searchInput.focus();
+    }
   });
   els.marketBtn.addEventListener('click', () => {
     els.marketPanel.classList.toggle('is-collapsed');
-    els.marketBtn.setAttribute('aria-expanded', String(!els.marketPanel.classList.contains('is-collapsed')));
+    const open = !els.marketPanel.classList.contains('is-collapsed');
+    els.marketBtn.setAttribute('aria-expanded', String(open));
+    if (open) expandSheet();
   });
   els.addCollection.addEventListener('click', addCurrentToCollection);
   els.clearCollection.addEventListener('click', () => setCollection([]));

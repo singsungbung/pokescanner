@@ -1,4 +1,4 @@
-const CACHE = 'uxrp-scanner-v21-lock-best-frame';
+const CACHE = 'uxrp-scanner-v22-bottom-sheet';
 const ASSETS = [
   './',
   './index.html',

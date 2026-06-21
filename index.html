@@ -47,110 +47,119 @@
       </div>
     </section>
 
-    <section class="result-card is-empty" id="resultCard" aria-label="스캔 결과">
-      <div class="thumb" id="thumb" aria-hidden="true">M1S</div>
-      <div class="info-grid">
-        <span>카드명</span><strong id="cardName">카드를 스캔하거나 검색</strong>
-        <span>세트</span><strong id="cardSet">JP · M1S 메가심포니아</strong>
-        <span>번호</span><strong id="cardNumber">—</strong>
-        <span>레어도</span><strong id="cardRarity">—</strong>
-      </div>
-      <div class="price-grid">
-        <div class="price-box">
-          <span>NM</span>
-          <strong id="nmPrice">—</strong>
-          <small>마지막 업데이트 기준</small>
-        </div>
-        <div class="price-box psa">
-          <span>PSA10</span>
-          <strong id="psaPrice">—</strong>
-          <small>마지막 업데이트 기준</small>
-        </div>
-      </div>
-      <div class="price-meta">
-        <span id="priceUpdated">업데이트 —</span>
-        <span id="priceConfidence">신뢰도 —</span>
-      </div>
-      <div class="status-row">
-        <span id="resultStatus" role="status" aria-live="polite">카드 찾는 중</span>
-      </div>
-      <div class="candidate-panel is-collapsed" id="candidatePanel" role="region" aria-live="polite" aria-label="후보 카드">
-        <div class="candidate-title" id="candidateTitle">후보 카드</div>
-        <div class="candidate-list" id="candidateList" role="list"></div>
+    <section class="bottom-sheet" id="bottomSheet" data-sheet-state="collapsed" aria-label="스캔 정보 패널">
+      <button class="sheet-grip" id="sheetGrip" type="button" aria-label="스캔 정보 패널 열기" aria-expanded="false">
+        <span class="sheet-handle" aria-hidden="true"></span>
+        <strong>스캔 정보</strong>
+        <small>위로 밀어 자세히 보기</small>
+      </button>
+      <div class="sheet-body">
+        <section class="result-card is-empty" id="resultCard" aria-label="스캔 결과">
+          <div class="thumb" id="thumb" aria-hidden="true">M1S</div>
+          <div class="info-grid">
+            <span>카드명</span><strong id="cardName">카드를 스캔하거나 검색</strong>
+            <span>세트</span><strong id="cardSet">JP · M1S 메가심포니아</strong>
+            <span>번호</span><strong id="cardNumber">—</strong>
+            <span>레어도</span><strong id="cardRarity">—</strong>
+          </div>
+          <div class="price-grid">
+            <div class="price-box">
+              <span>NM</span>
+              <strong id="nmPrice">—</strong>
+              <small>마지막 업데이트 기준</small>
+            </div>
+            <div class="price-box psa">
+              <span>PSA10</span>
+              <strong id="psaPrice">—</strong>
+              <small>마지막 업데이트 기준</small>
+            </div>
+          </div>
+          <div class="price-meta">
+            <span id="priceUpdated">업데이트 —</span>
+            <span id="priceConfidence">신뢰도 —</span>
+          </div>
+          <div class="status-row">
+            <span id="resultStatus" role="status" aria-live="polite">카드 찾는 중</span>
+          </div>
+          <div class="candidate-panel is-collapsed" id="candidatePanel" role="region" aria-live="polite" aria-label="후보 카드">
+            <div class="candidate-title" id="candidateTitle">후보 카드</div>
+            <div class="candidate-list" id="candidateList" role="list"></div>
+          </div>
+        </section>
+
+        <section class="controls" aria-label="스캔 조작">
+          <button id="startCamera" type="button">카메라 시작</button>
+          <label class="file-btn">
+            사진 스캔
+            <input id="imageInput" type="file" accept="image/*" capture="environment" aria-label="사진으로 카드 스캔" />
+          </label>
+          <button id="rescanBtn" type="button">다시 스캔</button>
+          <button id="toggleSearch" type="button" aria-expanded="false" aria-controls="searchPanel">직접 검색</button>
+          <button id="addCollection" type="button">컬렉션 추가</button>
+          <button id="marketBtn" type="button" aria-expanded="false" aria-controls="marketPanel">시세 보기</button>
+        </section>
+
+        <section class="search-panel is-collapsed" id="searchPanel">
+          <label class="visually-hidden" for="searchInput">카드 이름 또는 번호 검색</label>
+          <input id="searchInput" autocomplete="off" placeholder="예: 087/063, 090/063, アセロラ, 메가가디안" />
+          <div class="quick-row">
+            <button type="button" data-quick="087/063">087 SAR</button>
+            <button type="button" data-quick="090/063">아세로라 SAR</button>
+            <button type="button" data-quick="092/063">092 MUR</button>
+          </div>
+          <div class="search-results" id="searchResults"></div>
+        </section>
+
+        <section class="links-panel is-collapsed" id="marketPanel">
+          <button id="openCardrush" type="button">Cardrush</button>
+          <button id="openMercari" type="button">Mercari</button>
+          <button id="openYahoo" type="button">Yahoo 낙찰</button>
+          <button id="openGoogle" type="button">Google</button>
+        </section>
+
+        <details class="debug-panel" id="debugPanel">
+          <summary>스캔 진단</summary>
+          <div class="debug-actions" aria-label="스캔 진단 저장">
+            <button id="saveDebugSample" type="button">현재 crop 저장</button>
+            <button id="downloadDebugSamples" type="button">진단 다운로드</button>
+            <button id="clearDebugSamples" type="button">진단 비우기</button>
+          </div>
+          <div class="debug-grid">
+            <canvas id="debugCrop" width="126" height="176"></canvas>
+            <div class="debug-scores" id="debugScores">아직 분석 없음</div>
+          </div>
+          <div class="debug-samples" id="debugSamples">저장된 진단 없음</div>
+        </details>
+
+        <section class="history-panel">
+          <h2>최근 스캔 기록</h2>
+          <div class="history-list" id="recentScans">최근 기록 없음</div>
+        </section>
+
+        <details class="collection-panel">
+          <summary>내 컬렉션</summary>
+          <div class="collection-form">
+            <label>상태
+              <select id="collectionCondition">
+                <option>NM</option>
+                <option>LP</option>
+                <option>PSA10</option>
+                <option>PSA9</option>
+                <option>기타</option>
+              </select>
+            </label>
+            <label>수량 <input id="collectionQty" type="number" value="1" min="1" step="1" /></label>
+            <label>구매가(JPY) <input id="purchasePrice" type="number" min="0" step="100" placeholder="선택" /></label>
+            <label>구매일 <input id="purchaseDate" type="date" /></label>
+            <label>메모 <input id="collectionNote" type="text" placeholder="선택" /></label>
+            <label>보관 위치 <input id="storageLocation" type="text" placeholder="선택" /></label>
+          </div>
+          <div class="collection-summary" id="collectionSummary">컬렉션 없음</div>
+          <div class="collection" id="collectionBox">컬렉션 없음</div>
+          <button id="clearCollection" class="danger" type="button">컬렉션 비우기</button>
+        </details>
       </div>
     </section>
-
-    <section class="controls" aria-label="스캔 조작">
-      <button id="startCamera" type="button">카메라 시작</button>
-      <label class="file-btn">
-        사진 스캔
-        <input id="imageInput" type="file" accept="image/*" capture="environment" aria-label="사진으로 카드 스캔" />
-      </label>
-      <button id="rescanBtn" type="button">다시 스캔</button>
-      <button id="toggleSearch" type="button" aria-expanded="false" aria-controls="searchPanel">직접 검색</button>
-      <button id="addCollection" type="button">컬렉션 추가</button>
-      <button id="marketBtn" type="button" aria-expanded="false" aria-controls="marketPanel">시세 보기</button>
-    </section>
-
-    <section class="search-panel is-collapsed" id="searchPanel">
-      <label class="visually-hidden" for="searchInput">카드 이름 또는 번호 검색</label>
-      <input id="searchInput" autocomplete="off" placeholder="예: 087/063, 090/063, アセロラ, 메가가디안" />
-      <div class="quick-row">
-        <button type="button" data-quick="087/063">087 SAR</button>
-        <button type="button" data-quick="090/063">아세로라 SAR</button>
-        <button type="button" data-quick="092/063">092 MUR</button>
-      </div>
-      <div class="search-results" id="searchResults"></div>
-    </section>
-
-    <section class="links-panel is-collapsed" id="marketPanel">
-      <button id="openCardrush" type="button">Cardrush</button>
-      <button id="openMercari" type="button">Mercari</button>
-      <button id="openYahoo" type="button">Yahoo 낙찰</button>
-      <button id="openGoogle" type="button">Google</button>
-    </section>
-
-    <details class="debug-panel" id="debugPanel">
-      <summary>스캔 진단</summary>
-      <div class="debug-actions" aria-label="스캔 진단 저장">
-        <button id="saveDebugSample" type="button">현재 crop 저장</button>
-        <button id="downloadDebugSamples" type="button">진단 다운로드</button>
-        <button id="clearDebugSamples" type="button">진단 비우기</button>
-      </div>
-      <div class="debug-grid">
-        <canvas id="debugCrop" width="126" height="176"></canvas>
-        <div class="debug-scores" id="debugScores">아직 분석 없음</div>
-      </div>
-      <div class="debug-samples" id="debugSamples">저장된 진단 없음</div>
-    </details>
-
-    <section class="history-panel">
-      <h2>최근 스캔 기록</h2>
-      <div class="history-list" id="recentScans">최근 기록 없음</div>
-    </section>
-
-    <details class="collection-panel">
-      <summary>내 컬렉션</summary>
-      <div class="collection-form">
-        <label>상태
-          <select id="collectionCondition">
-            <option>NM</option>
-            <option>LP</option>
-            <option>PSA10</option>
-            <option>PSA9</option>
-            <option>기타</option>
-          </select>
-        </label>
-        <label>수량 <input id="collectionQty" type="number" value="1" min="1" step="1" /></label>
-        <label>구매가(JPY) <input id="purchasePrice" type="number" min="0" step="100" placeholder="선택" /></label>
-        <label>구매일 <input id="purchaseDate" type="date" /></label>
-        <label>메모 <input id="collectionNote" type="text" placeholder="선택" /></label>
-        <label>보관 위치 <input id="storageLocation" type="text" placeholder="선택" /></label>
-      </div>
-      <div class="collection-summary" id="collectionSummary">컬렉션 없음</div>
-      <div class="collection" id="collectionBox">컬렉션 없음</div>
-      <button id="clearCollection" class="danger" type="button">컬렉션 비우기</button>
-    </details>
   </main>
 </body>
 </html>
