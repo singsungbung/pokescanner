@@ -38,17 +38,21 @@
 `data/prices.js`는 가격 정보만 저장합니다.
 
 - `card_id`
-- `nm_jpy`
-- `psa10_jpy`
-- `quick_sell_nm_jpy`
-- `quick_sell_psa10_jpy`
+- `currency`: 현재 `KRW`
+- `nm_krw`
+- `psa10_krw`
+- `quick_sell_nm_krw`
+- `quick_sell_psa10_krw`
 - `updated_at`
 - `confidence`
 - `sources`
 - `source_links`
+- `exchange_rates`
 - `note`
 
 가격이 없으면 앱은 임의 추정값을 만들지 않고 `가격 데이터 없음`으로 표시합니다.
+현재 환율 스냅샷은 `1 USD = 1,500 KRW`, `1 JPY = 9.4 KRW`입니다.
+NM 목표 소스는 TCGPlayer, PSA10 목표 소스는 KREAM 일판 최근 체결가입니다. 검증된 값이 없는 카드는 로컬 스타터 캐시를 원화로 환산하고 `confidence: low`로 둡니다.
 
 `data/visual-index.js`는 이미지 기반 인식을 위한 선택 DB입니다.
 
@@ -137,6 +141,7 @@ python -m http.server 8000
 ## 가격 표시
 
 스캔 또는 검색으로 카드가 확정되면 같은 `card_id`를 가진 가격 레코드를 `data/prices.js`에서 찾습니다.
+가격은 원화(KRW)로 표시합니다.
 
 표시 항목:
 

@@ -1,4 +1,4 @@
-const CACHE = 'uxrp-scanner-v22-bottom-sheet';
+const CACHE = 'uxrp-scanner-v23-krw-prices';
 const ASSETS = [
   './',
   './index.html',

@@ -177,7 +177,20 @@ const DEBUG_SAMPLE_LIMIT = 12;
 
 const isFiniteNumber = (value) => Number.isFinite(value);
 const pad3 = (value) => String(value).padStart(3, '0');
-const fmtJPY = (value) => isFiniteNumber(value) ? `¥${value.toLocaleString('ja-JP')}` : '가격 데이터 없음';
+const FIXED_USD_TO_KRW = 1500;
+const FIXED_JPY_TO_KRW = 9.4;
+const fmtKRW = (value) => isFiniteNumber(value) ? `₩${Math.round(value).toLocaleString('ko-KR')}` : '가격 데이터 없음';
+
+function legacyJpyToKrw(value) {
+  return isFiniteNumber(value) ? Math.round((value * FIXED_JPY_TO_KRW) / 10) * 10 : null;
+}
+
+function priceKrw(price, field) {
+  if (!price) return null;
+  if (field === 'nm') return isFiniteNumber(price.nm_krw) ? price.nm_krw : legacyJpyToKrw(price.nm_jpy);
+  if (field === 'psa10') return isFiniteNumber(price.psa10_krw) ? price.psa10_krw : legacyJpyToKrw(price.psa10_jpy);
+  return null;
+}
 
 function selectedCards() {
   return cards.filter(card =>
@@ -244,7 +257,7 @@ function collapseSheet() {
 }
 
 function priceHasValue(price) {
-  return Boolean(price) && (isFiniteNumber(price.nm_jpy) || isFiniteNumber(price.psa10_jpy));
+  return Boolean(price) && (isFiniteNumber(priceKrw(price, 'nm')) || isFiniteNumber(priceKrw(price, 'psa10')));
 }
 
 function priceFor(card) {
@@ -342,8 +355,8 @@ function renderCard(card) {
   els.cardSet.textContent = `${card.language} · ${card.set_code} ${card.set_name_ko}`;
   els.cardNumber.textContent = card.number;
   els.cardRarity.textContent = card.rarity;
-  els.nmPrice.textContent = hasPrice ? fmtJPY(price.nm_jpy) : '가격 데이터 없음';
-  els.psaPrice.textContent = hasPrice ? fmtJPY(price.psa10_jpy) : '가격 데이터 없음';
+  els.nmPrice.textContent = hasPrice ? fmtKRW(priceKrw(price, 'nm')) : '가격 데이터 없음';
+  els.psaPrice.textContent = hasPrice ? fmtKRW(priceKrw(price, 'psa10')) : '가격 데이터 없음';
   els.priceUpdated.textContent = price?.updated_at ? `업데이트 ${price.updated_at}` : '업데이트 —';
   els.priceConfidence.textContent = price?.confidence ? `신뢰도 ${price.confidence}` : '신뢰도 —';
   setThumbContent(card);
@@ -1185,7 +1198,7 @@ function renderSearch(query) {
         <strong>${card.name_jp}</strong><br>
         <small>${card.name_en} · ${card.number} · ${card.rarity}</small>
       </div>
-      <small>NM ${fmtJPY(price?.nm_jpy)}<br>PSA10 ${fmtJPY(price?.psa10_jpy)}</small>
+      <small>NM ${fmtKRW(priceKrw(price, 'nm'))}<br>PSA10 ${fmtKRW(priceKrw(price, 'psa10'))}</small>
     `;
     item.addEventListener('click', () => confirmCard(card, 'search'));
     els.searchResults.appendChild(item);
@@ -2618,7 +2631,7 @@ function collection() {
     card_id: item.card_id || item.id,
     condition: 'NM',
     qty: Number(item.qty || 1),
-    purchase_price_jpy: null,
+    purchase_price_krw: null,
     purchase_date: '',
     memo: '',
     storage_location: '',
@@ -2633,8 +2646,8 @@ function setCollection(items) {
 
 function valueForCondition(condition, price) {
   if (!price) return null;
-  if (condition === 'NM') return price.nm_jpy;
-  if (condition === 'PSA10') return price.psa10_jpy;
+  if (condition === 'NM') return priceKrw(price, 'nm');
+  if (condition === 'PSA10') return priceKrw(price, 'psa10');
   return null;
 }
 
@@ -2665,10 +2678,13 @@ function renderCollection() {
     if (isFiniteNumber(conditionValue)) conditionTotal += conditionValue * qty;
     else conditionMissing += qty;
 
-    if (isFiniteNumber(price?.nm_jpy)) nmTotal += price.nm_jpy * qty;
+    const nmValue = priceKrw(price, 'nm');
+    const psa10Value = priceKrw(price, 'psa10');
+
+    if (isFiniteNumber(nmValue)) nmTotal += nmValue * qty;
     else nmMissing += qty;
 
-    if (isFiniteNumber(price?.psa10_jpy)) psaTotal += price.psa10_jpy * qty;
+    if (isFiniteNumber(psa10Value)) psaTotal += psa10Value * qty;
     else psaMissing += qty;
 
     const row = document.createElement('div');
@@ -2678,15 +2694,15 @@ function renderCollection() {
         <strong>${card.name_jp}</strong><br>
         <small>${card.set_code} · ${card.number} · ${card.rarity} · ${item.condition} ×${qty}</small>
       </div>
-      <small>NM ${fmtJPY(price?.nm_jpy)}<br>PSA10 ${fmtJPY(price?.psa10_jpy)}</small>
+      <small>NM ${fmtKRW(nmValue)}<br>PSA10 ${fmtKRW(psa10Value)}</small>
     `;
     els.collectionBox.appendChild(row);
   }
 
   els.collectionSummary.innerHTML = `
-    보유 상태 기준: ${fmtJPY(conditionTotal)}${conditionMissing ? ` · 미반영 ${conditionMissing}장` : ''}<br>
-    전부 NM 기준: ${fmtJPY(nmTotal)}${nmMissing ? ` · 미반영 ${nmMissing}장` : ''}<br>
-    전부 PSA10 기준: ${fmtJPY(psaTotal)}${psaMissing ? ` · 미반영 ${psaMissing}장` : ''}
+    보유 상태 기준: ${fmtKRW(conditionTotal)}${conditionMissing ? ` · 미반영 ${conditionMissing}장` : ''}<br>
+    전부 NM 기준: ${fmtKRW(nmTotal)}${nmMissing ? ` · 미반영 ${nmMissing}장` : ''}<br>
+    전부 PSA10 기준: ${fmtKRW(psaTotal)}${psaMissing ? ` · 미반영 ${psaMissing}장` : ''}
   `;
 }
 
@@ -2703,7 +2719,7 @@ function addCurrentToCollection() {
     card_id: currentCard.card_id,
     condition: els.collectionCondition.value || 'NM',
     qty,
-    purchase_price_jpy: els.purchasePrice.value ? Number(els.purchasePrice.value) : null,
+    purchase_price_krw: els.purchasePrice.value ? Number(els.purchasePrice.value) : null,
     purchase_date: els.purchaseDate.value || '',
     memo: els.collectionNote.value || '',
     storage_location: els.storageLocation.value || '',
