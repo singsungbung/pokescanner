@@ -1,4 +1,4 @@
-const CACHE = 'm1s-scanner-v18-track-crops';
+const CACHE = 'm1s-scanner-v19-diagnostics';
 const ASSETS = [
   './',
   './index.html',

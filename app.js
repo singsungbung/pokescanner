@@ -40,6 +40,10 @@ const els = {
   candidateList: $('candidateList'),
   debugCrop: $('debugCrop'),
   debugScores: $('debugScores'),
+  saveDebugSample: $('saveDebugSample'),
+  downloadDebugSamples: $('downloadDebugSamples'),
+  clearDebugSamples: $('clearDebugSamples'),
+  debugSamples: $('debugSamples'),
   thumb: $('thumb'),
   addCollection: $('addCollection'),
   collectionCondition: $('collectionCondition'),
@@ -154,10 +158,13 @@ let smoothedDetectionAt = 0;
 let rejectedDetectionJumps = 0;
 let consecutiveNumberMisses = 0;
 let ocrVotes = [];
+let lastDebugSnapshot = null;
 const scanThumbByCardId = new Map();
 
 const recentStorageKey = 'm1s_recent_scans_v1';
 const collectionStorageKey = 'm1s_collection_v3';
+const debugStorageKey = 'm1s_debug_samples_v1';
+const DEBUG_SAMPLE_LIMIT = 12;
 
 const isFiniteNumber = (value) => Number.isFinite(value);
 const pad3 = (value) => String(value).padStart(3, '0');
@@ -779,6 +786,34 @@ function updateDebugView(cardCanvas, candidates = [], label = '') {
     ctx.clearRect(0, 0, els.debugCrop.width, els.debugCrop.height);
     ctx.drawImage(cardCanvas, 0, 0, els.debugCrop.width, els.debugCrop.height);
   }
+
+  lastDebugSnapshot = {
+    captured_at: new Date().toISOString(),
+    label: label || '후보 없음',
+    selected_set: `${selectedSet.language}|${selectedSet.set_code}`,
+    current_card_id: currentCard?.card_id || null,
+    current_card_number: currentCard?.number || null,
+    locked_card_id: lockedCardId || null,
+    scan_status: els.scanStatus?.textContent || '',
+    mode_status: els.detectStatus?.textContent || '',
+    visual_margin: visualMargin(candidates),
+    candidates: candidates.slice(0, 5).map((item, index) => ({
+      rank: index + 1,
+      card_id: item.card.card_id,
+      name_jp: item.card.name_jp,
+      name_ko: item.card.name_ko,
+      name_en: item.card.name_en,
+      number: item.card.number,
+      rarity: item.card.rarity,
+      score: item.score || 0,
+      visualScore: item.visualScore || 0,
+      artworkScore: item.artworkScore || 0,
+      layoutColorScore: item.layoutColorScore || 0,
+      numberScore: item.numberScore || 0,
+      nameScore: item.nameScore || 0,
+      votes: item.votes || 0
+    }))
+  };
 
   if (!els.debugScores) return;
   if (!candidates.length) {
@@ -2315,6 +2350,130 @@ function readJson(key, fallback) {
   }
 }
 
+function debugSamples() {
+  return readJson(debugStorageKey, []);
+}
+
+function setDebugSamples(items) {
+  const trimmed = items.slice(0, DEBUG_SAMPLE_LIMIT);
+  try {
+    localStorage.setItem(debugStorageKey, JSON.stringify(trimmed));
+  } catch (err) {
+    console.warn('debug sample storage failed, saving metadata only:', err);
+    const metadataOnly = trimmed.slice(0, 6).map(item => ({ ...item, crop_image: '' }));
+    localStorage.setItem(debugStorageKey, JSON.stringify(metadataOnly));
+  }
+  renderDebugSamples();
+}
+
+function debugCropDataUrl() {
+  try {
+    if (!els.debugCrop) return '';
+    return els.debugCrop.toDataURL('image/jpeg', 0.74);
+  } catch {
+    return '';
+  }
+}
+
+function buildDebugSample(reason = 'manual') {
+  const fallbackSnapshot = {
+    captured_at: new Date().toISOString(),
+    label: '수동 저장',
+    selected_set: `${selectedSet.language}|${selectedSet.set_code}`,
+    current_card_id: currentCard?.card_id || null,
+    current_card_number: currentCard?.number || null,
+    locked_card_id: lockedCardId || null,
+    scan_status: els.scanStatus?.textContent || '',
+    mode_status: els.detectStatus?.textContent || '',
+    visual_margin: 0,
+    candidates: []
+  };
+  return {
+    ...(lastDebugSnapshot || fallbackSnapshot),
+    saved_at: new Date().toISOString(),
+    reason,
+    user_agent: navigator.userAgent,
+    viewport: {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1
+    },
+    crop_image: debugCropDataUrl()
+  };
+}
+
+function saveCurrentDebugSample() {
+  const sample = buildDebugSample('manual');
+  if (!sample.crop_image && !sample.candidates.length) {
+    setStatus('failed', '저장할 진단 없음');
+    return;
+  }
+  const items = debugSamples();
+  items.unshift(sample);
+  setDebugSamples(items);
+  setStatus('complete', `진단 저장됨 ${Math.min(items.length, DEBUG_SAMPLE_LIMIT)}개`);
+}
+
+function downloadDebugSamples() {
+  const samples = debugSamples();
+  if (!samples.length) {
+    setStatus('failed', '저장된 진단 없음');
+    return;
+  }
+
+  const payload = {
+    exported_at: new Date().toISOString(),
+    app: 'MonPrice M1S Scanner',
+    set: selectedSet,
+    samples
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `m1s-scan-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 800);
+  setStatus('complete', '진단 다운로드');
+}
+
+function clearDebugSamples() {
+  localStorage.removeItem(debugStorageKey);
+  renderDebugSamples();
+  setStatus('ready', '진단 비움');
+}
+
+function renderDebugSamples() {
+  if (!els.debugSamples) return;
+  const samples = debugSamples();
+  els.debugSamples.innerHTML = '';
+  if (!samples.length) {
+    els.debugSamples.textContent = '저장된 진단 없음';
+    return;
+  }
+
+  const title = document.createElement('div');
+  title.className = 'debug-sample-title';
+  title.textContent = `저장된 진단 ${samples.length}/${DEBUG_SAMPLE_LIMIT}`;
+  els.debugSamples.appendChild(title);
+
+  for (const sample of samples.slice(0, 4)) {
+    const top = sample.candidates?.[0];
+    const row = document.createElement('div');
+    row.className = 'debug-sample-row';
+    const time = new Date(sample.saved_at || sample.captured_at).toLocaleString('ko-KR', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    row.textContent = top
+      ? `${time} · ${sample.label} · 1위 ${top.number} ${top.name_jp} · visual ${top.visualScore}`
+      : `${time} · ${sample.label} · 후보 없음`;
+    els.debugSamples.appendChild(row);
+  }
+}
+
 function cardById(cardId) {
   return cards.find(card => card.card_id === cardId || card.id === cardId) || null;
 }
@@ -2496,6 +2655,7 @@ function init() {
   renderEmpty('seeking');
   renderRecentScans();
   renderCollection();
+  renderDebugSamples();
 
   els.searchInput.addEventListener('input', e => renderSearch(e.target.value));
   document.querySelectorAll('[data-quick]').forEach(btn => btn.addEventListener('click', () => {
@@ -2537,6 +2697,9 @@ function init() {
   });
   els.addCollection.addEventListener('click', addCurrentToCollection);
   els.clearCollection.addEventListener('click', () => setCollection([]));
+  els.saveDebugSample?.addEventListener('click', saveCurrentDebugSample);
+  els.downloadDebugSamples?.addEventListener('click', downloadDebugSamples);
+  els.clearDebugSamples?.addEventListener('click', clearDebugSamples);
   els.openCardrush.addEventListener('click', () => openExternal('cardrush'));
   els.openMercari.addEventListener('click', () => openExternal('mercari'));
   els.openYahoo.addEventListener('click', () => openExternal('yahoo'));

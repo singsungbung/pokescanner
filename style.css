@@ -380,6 +380,10 @@ video {
 
 .result-card.is-empty .thumb { opacity: .72; }
 
+.result-card:not(.is-empty) {
+  border-color: rgba(74,163,255,.34);
+}
+
 .thumb {
   width: 76px;
   height: 106px;
@@ -468,6 +472,11 @@ video {
   gap: 8px;
   color: var(--muted);
   font-size: 13px;
+  line-height: 1.35;
+}
+
+.price-meta {
+  flex-wrap: wrap;
 }
 
 .status-row {
@@ -481,6 +490,7 @@ video {
   padding: 10px 11px;
   border-radius: 8px;
   background: rgba(255,255,255,.08);
+  border-left: 3px solid var(--accent-strong);
   line-height: 1.35;
 }
 
@@ -625,6 +635,20 @@ video {
   font-weight: 850;
 }
 
+.debug-actions {
+  margin-top: 9px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.debug-actions button {
+  min-height: 38px;
+  padding: 8px 7px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
 .debug-grid {
   margin-top: 8px;
   display: grid;
@@ -664,6 +688,27 @@ video {
 
 .debug-score-row small {
   color: var(--muted);
+}
+
+.debug-samples {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.debug-sample-title {
+  color: var(--text);
+  font-weight: 850;
+}
+
+.debug-sample-row {
+  padding: 7px;
+  border-radius: 8px;
+  background: rgba(255,255,255,.045);
+  border: 1px solid rgba(255,255,255,.08);
+  line-height: 1.35;
 }
 
 .quick-row { margin-top: 8px; }
@@ -772,6 +817,7 @@ video {
   .result-card { grid-template-columns: 66px 1fr; }
   .thumb { width: 66px; height: 92px; }
   .price-box strong { font-size: 17px; }
+  .debug-actions { grid-template-columns: 1fr; }
   .collection-form { grid-template-columns: 1fr; }
 }
 
