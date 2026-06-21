@@ -118,7 +118,11 @@ const VISUAL_PREVIEW_SCORE = 26;
 const VISUAL_OCR_LOCK_FLOOR = 22;
 const VISUAL_MARGIN_LOCK = 3;
 const LOCK_HOLD_MS = 900;
-const LOCK_RECHECK_MS = 360;
+const LOCK_RECHECK_MS = 260;
+const LOCK_THUMB_UPDATE_MS = 220;
+const LOCK_BEST_FRAME_WINDOW_MS = 1200;
+const LOCK_THUMB_MIN_SCORE_GAIN = 3;
+const LOCK_THUMB_MIN_MARGIN_GAIN = 2;
 const LOCK_SWITCH_SCORE = 52;
 const LOCK_SWITCH_VOTES = 2;
 const LOCK_LOST_MS = 1100;
@@ -153,6 +157,9 @@ let lockSwitchCardId = null;
 let lockSwitchCount = 0;
 let lastLockCheckTick = 0;
 let lastLockSeenAt = 0;
+let lockBestVisualScore = 0;
+let lockBestMargin = 0;
+let lastLockThumbUpdate = 0;
 let smoothedDetection = null;
 let smoothedDetectionAt = 0;
 let rejectedDetectionJumps = 0;
@@ -253,6 +260,27 @@ function rememberScanThumbnail(card, sourceCanvas) {
   } catch (err) {
     console.warn('scan thumb failed:', err);
   }
+}
+
+function updateLockBestFrame(candidate, candidates, cardFrame, now) {
+  if (!candidate || !cardFrame || candidate.card.card_id !== lockedCardId) return false;
+  if (now - lastLockThumbUpdate < LOCK_THUMB_UPDATE_MS) return false;
+
+  const visualScore = candidate.visualScore || 0;
+  const margin = visualMargin(candidates);
+  const isEarlyLock = now - lockedAt <= LOCK_BEST_FRAME_WINDOW_MS;
+  const betterScore = visualScore >= lockBestVisualScore + (isEarlyLock ? 1 : LOCK_THUMB_MIN_SCORE_GAIN);
+  const betterMargin = margin >= lockBestMargin + (isEarlyLock ? 1 : LOCK_THUMB_MIN_MARGIN_GAIN);
+  const strongEnough = visualScore >= VISUAL_PREVIEW_SCORE && margin >= 0;
+
+  if (!strongEnough || (!betterScore && !betterMargin)) return false;
+
+  lockBestVisualScore = Math.max(lockBestVisualScore, visualScore);
+  lockBestMargin = Math.max(lockBestMargin, margin);
+  lastLockThumbUpdate = now;
+  rememberScanThumbnail(candidate.card, cardFrame);
+  if (currentCard?.card_id === candidate.card.card_id) setThumbContent(currentCard);
+  return true;
 }
 
 function renderEmpty(statusKey = 'seeking') {
@@ -855,7 +883,7 @@ function isScanLocked() {
   return Boolean(currentCard && lockedCardId === currentCard.card_id);
 }
 
-function lockScan(card) {
+function lockScan(card, options = {}) {
   if (!card) return;
   const now = Date.now();
   lockedCardId = card.card_id;
@@ -864,6 +892,10 @@ function lockScan(card) {
   lastLockCheckTick = 0;
   lockSwitchCardId = null;
   lockSwitchCount = 0;
+  lockBestVisualScore = options.visualScore || 0;
+  lockBestMargin = options.margin || 0;
+  lastLockThumbUpdate = options.cardFrame ? now : 0;
+  if (options.cardFrame) rememberScanThumbnail(card, options.cardFrame);
 }
 
 function releaseScanLock() {
@@ -873,6 +905,9 @@ function releaseScanLock() {
   lastLockCheckTick = 0;
   lockSwitchCardId = null;
   lockSwitchCount = 0;
+  lockBestVisualScore = 0;
+  lockBestMargin = 0;
+  lastLockThumbUpdate = 0;
   resetSmoothedDetection();
 }
 
@@ -913,7 +948,11 @@ function reviewLockedCard(detection, now) {
     lastLockSeenAt = now;
     lockSwitchCardId = null;
     lockSwitchCount = 0;
-    setStatus(priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice', `${currentCard.number} · 검토 중`);
+    const updatedBestFrame = updateLockBestFrame(sameCandidate, candidates, cardFrame, now);
+    setStatus(
+      priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice',
+      updatedBestFrame ? `${currentCard.number} · 이미지 개선됨` : `${currentCard.number} · 검토 중`
+    );
     lastOverlayState = priceHasValue(priceFor(currentCard)) ? 'complete' : 'noPrice';
     return true;
   }
@@ -937,7 +976,11 @@ function reviewLockedCard(detection, now) {
     if (lockSwitchCount >= LOCK_SWITCH_VOTES) {
       rememberScanThumbnail(top.card, cardFrame);
       confirmCard(top.card, 'scan');
-      lockScan(top.card);
+      lockScan(top.card, {
+        visualScore: top.visualScore || 0,
+        margin: visualMargin(candidates),
+        cardFrame
+      });
       drawDetectedOverlay(detection, priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice');
       lastOverlayState = priceHasValue(priceFor(top.card)) ? 'complete' : 'noPrice';
     }
@@ -2213,7 +2256,9 @@ function handleOcrCandidates(candidates, detection, rawText, options = {}) {
     hideCandidates();
     handleDetectedCard(top.card, detection, rawText, {
       ...options,
-      confirmImmediately: options.confirmImmediately || clearNumber || stableVote
+      confirmImmediately: options.confirmImmediately || clearNumber || stableVote,
+      lockVisualScore: top.visualScore || 0,
+      lockMargin: visualMargin(display)
     });
     return;
   }
@@ -2249,7 +2294,11 @@ function handleDetectedCard(card, detection, rawText, options = {}) {
 
   const thumbCanvas = options.cardFrame || captureCardFromDetection(detection);
   confirmCard(card, 'scan', thumbCanvas);
-  lockScan(card);
+  lockScan(card, {
+    visualScore: options.lockVisualScore || 0,
+    margin: options.lockMargin || 0,
+    cardFrame: thumbCanvas
+  });
   clearCandidateVotes();
   if (detection) drawDetectedOverlay(detection, priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');
   else drawGuideOcrOverlay(priceHasValue(priceFor(card)) ? 'complete' : 'noPrice');

@@ -1,4 +1,4 @@
-const CACHE = 'uxrp-scanner-v20-rename';
+const CACHE = 'uxrp-scanner-v21-lock-best-frame';
 const ASSETS = [
   './',
   './index.html',
